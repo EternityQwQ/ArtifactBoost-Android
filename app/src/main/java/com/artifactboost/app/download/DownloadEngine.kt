@@ -106,6 +106,9 @@ sealed class DownloadException(message: String) : IOException(message) {
     object Cancelled : DownloadException("下载已取消")
     object Incomplete : DownloadException("下载失败：数据校验不通过（可能断流），请重试")
 
+    /** 服务器忽略 Range 头（回 200 全量）：这条地址不能用于分段下载 */
+    object NoRange : DownloadException("下载失败：该通道不支持分段下载")
+
     /** 服务器明确要求我们慢一点（429 / 503 等），需要按 Retry-After 退避 */
     class Throttled(val code: Int, val retryAfterMillis: Long?) :
         DownloadException("下载失败：服务器限流（$code）")
@@ -464,9 +467,25 @@ class DownloadEngine {
                     var allowedLanes = minOf(rampStepFor(lanes), lanes)
                     var lastRampAt = System.nanoTime()
 
+                    // 无进展保护：所有 worker 都在「失败→重派→再失败」里空转、
+                    // 文件一个字节都没涨，这种状态持续 90 秒就判定全线失败。
+                    // 没有它，全线断网/磁盘写挂时调度器会永远空转下去。
+                    var lastProgressBytes = written.get()
+                    var lastProgressAt = System.nanoTime()
+
                     while (true) {
                         // 取消后立刻退出调度循环，不再派新活儿
                         if (cancelled || DownloadEngineFlag.cancelled) throw DownloadException.Cancelled
+
+                        val nowProgress = written.get()
+                        if (nowProgress != lastProgressBytes) {
+                            lastProgressBytes = nowProgress
+                            lastProgressAt = System.nanoTime()
+                        } else if (jobs.isNotEmpty() &&
+                            (System.nanoTime() - lastProgressAt) > 90_000_000_000L
+                        ) {
+                            throw DownloadException.Incomplete
+                        }
 
                         jobs.removeAll { it.isCompleted }
 
@@ -798,7 +817,7 @@ class DownloadEngine {
         const val PROGRESS_INTERVAL_MS = 250L
 
         /** 引擎并发上限（与 AccelerationSettings.MAX_CONNECTIONS 一致） */
-        const val MAX_LANES = 512
+        const val MAX_LANES = 128
 
         /** 单连接模式判断「能否升级为分段」时试探的字节数 */
         const val SINGLE_PROBE_BYTES = 64 * 1024
@@ -840,14 +859,16 @@ class DownloadEngine {
             return if (seconds in 0..600) seconds * 1000 else null
         }
 
-        /** 指数退避 + 抖动；限流时优先听服务端的 Retry-After */
+        /** 指数退避 + 抖动；限流时优先听服务端的 Retry-After。
+         *  限流退避上限压到 1.5s：worker 命中限流后要么很快回来、要么直接让位，
+         *  绝不攥着区间长睡 —— 一次 Retry-After: 600 的限流不该让整条下载停十分钟。 */
         fun backoffMillis(attempt: Int, error: Exception): Long {
             if (error is DownloadException.Throttled) {
                 val suggested = error.retryAfterMillis
                 // 防雪崩：多个 worker 同时被限流时把退避时间错开
                 val base = suggested ?: (1000L shl (attempt - 1).coerceIn(0, 4))
                 val jitter = (base * 0.25 * Math.random()).toLong()
-                return (base + jitter).coerceIn(250L, 30_000L)
+                return (base + jitter).coerceIn(250L, 1_500L)
             }
             val base = 250L shl (attempt - 1).coerceIn(0, 5)
             val jitter = (base * 0.3 * Math.random()).toLong()
@@ -999,7 +1020,7 @@ private suspend fun runSlice(
             board.remove(laneId)
             return
         } catch (e: Exception) {
-            // 这一片彻底失败（重试耗尽）：在面板上标红，然后交给上层判断
+            // 这一片彻底失败（重试耗尽）：在面板上标红
             board.update(
                 LaneSnapshot(
                     laneId = laneId,
@@ -1016,7 +1037,11 @@ private suspend fun runSlice(
             )
             // 失败的那一段必须还回池子，否则文件会缺一块
             if (current.length > 0) pool.putBack(Chunk(0, from, current.end))
-            throw e
+            // 让位退出，而不是向上抛：一条 lane 重试 3 次失败不该取消整个下载
+            // —— 异常从协程冒出去会连带取消全部 worker。调度器马上会派新的
+            // worker 继续吃池子里的区间；真到「全线都下不动」时，调度循环的
+            // 无进展保护会负责终止下载。
+            return
         }
 
         if (outcome.received > 0) {
@@ -1087,6 +1112,9 @@ private suspend fun fetchSlice(
 ): SliceOutcome {
     var lastError: Exception = DownloadException.BadResponse
     var attempt = 0
+    // 限流撞了两回就直接放弃这一片：继续退避 = 攥着区间干等，
+    // 整条下载都陪着这条被限流的通道停摆。让位给调度器重新派。
+    var throttledCount = 0
 
     while (attempt < DownloadEngine.MAX_ATTEMPTS) {
         // 每轮重试前先看有没有被取消
@@ -1111,7 +1139,13 @@ private suspend fun fetchSlice(
             val data = try {
                 call.execute().use { response ->
                     when (response.code) {
-                        206, 200 -> Unit
+                        206 -> Unit
+                        200 -> {
+                            // 服务器忽略了 Range（回 200 全量）：除了 start==0，
+                            // 读到的都是文件头的数据，写到 chunk.start 偏移就是损坏文件。
+                            // 当作这条地址不支持分段，换备用地址重试。
+                            if (chunk.start != 0L) throw DownloadException.NoRange
+                        }
                         429, 503 -> {
                             pool.throttles.incrementAndGet()
                             board.throttles.incrementAndGet()
@@ -1156,9 +1190,22 @@ private suspend fun fetchSlice(
             board.retries.incrementAndGet()
             if (attempt >= DownloadEngine.MAX_ATTEMPTS) break
 
+            // 不支持 Range 的地址：换下一个立刻重试，不退避 —— 这是地址选错了，
+            // 不是服务器忙（attempt 照常消耗，单地址轮到自己时也能正常退出）
+            if (e is DownloadException.NoRange) {
+                channel.endpoints = channel.endpoints.drop(1) + channel.endpoints.first()
+                continue
+            }
+
             if (e is DownloadException.Throttled) {
                 // 被限流：把这条通道的权重降下来，让活儿分给别人
                 channel.measuredSpeed = maxOf(channel.measuredSpeed * 0.5, 1.0)
+                throttledCount++
+                if (throttledCount >= 2) {
+                    // 连着两次限流：这条通道眼下进不去，别攥着区间长睡，
+                    // 直接放弃这一片 —— 调度器马上会把活儿派给健康通道。
+                    break
+                }
             }
             if (attempt >= 2 && channel.endpoints.size > 1) {
                 // 通道彻底不通了就轮到备用地址

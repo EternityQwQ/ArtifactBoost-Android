@@ -186,12 +186,12 @@ data class AccelerationSettings(
     }
 
     companion object {
-        /** 引擎接受的并发上限。128 以上属于「极限档」：吃千兆内网/高速 Wi-Fi 用，
-         *  普通宽带大概率吃不满，且更容易被 CDN 限流（引擎会自动退避降速，不会失败）。 */
-        const val MAX_CONNECTIONS = 512
+        /** 引擎接受的并发上限。128 属于极限档：吃千兆内网/高速 Wi-Fi 用，
+         *  普通宽带吃不满，且更容易被 CDN 限流（引擎会自动退让，不会失败）。 */
+        const val MAX_CONNECTIONS = 128
 
-        /** 设置页档位：前 4 档是常规区间，后 3 档是极限档（UI 上分两行展示）。 */
-        val CONNECTION_OPTIONS = listOf(8, 16, 32, 64, 128, 256, 512)
+        /** 设置页档位 */
+        val CONNECTION_OPTIONS = listOf(8, 16, 32, 64, 128)
 
         private const val PREFS_NAME = "artifactboost_settings"
         private const val KEY_CONNECTIONS = "ab.connections"
