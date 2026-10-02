@@ -8,11 +8,27 @@ import kotlinx.coroutines.coroutineScope
 import java.net.URLEncoder
 
 /**
+ * 通道的作用域：决定它能套在哪种 URL 上。
+ *
+ * 这是新增 ghfast 后必须区分的一件事 ——
+ * 常规镜像（gh-proxy 等）是「把已签名的真实地址塞进前缀」，任何地址都能中转；
+ * 而 ghfast.top 只认 `github.com` 原始地址，套到 Azure 签名地址上会直接 400。
+ */
+enum class RouteScope {
+    /** 可用于任何地址（含 Azure 签名地址） */
+    ANY,
+
+    /** 只能用于 github.com 的原始地址（发行版附件的稳定下载链接） */
+    GITHUB_ONLY,
+}
+
+/**
  * 下载通道：直连 Azure 签名地址，或经由镜像 / 自建反代中转（前缀 + 原始地址）。
  */
 data class DownloadRoute(
     val name: String,
     val prefix: String,
+    val scope: RouteScope = RouteScope.ANY,
 ) {
     val isDirect: Boolean get() = prefix.isEmpty()
 
@@ -34,6 +50,29 @@ data class DownloadRoute(
             DownloadRoute("hk.gh-proxy.com", "https://hk.gh-proxy.com/"),
             DownloadRoute("moeyy.xyz", "https://github.moeyy.xyz/"),
         )
+
+        /**
+         * ghfast.top —— **只能用于发行版**。
+         *
+         * 它的用法是 `https://ghfast.top/https://github.com/...`，
+         * 也就是必须给它一个 github.com 的原始地址；
+         * 构建产物 / 构建日志解析出来的是临时签名地址，套上去会被拒。
+         * 因此单独归类，只在下载发行版附件时参与候选。
+         */
+        val GHFAST = DownloadRoute(
+            name = "ghfast.top",
+            prefix = "https://ghfast.top/",
+            scope = RouteScope.GITHUB_ONLY,
+        )
+
+        /**
+         * 给一次具体下载挑可用的镜像。
+         *
+         * @param githubUrl 该下载在 github.com 上的稳定地址；只有发行版有，其余为 null。
+         *        为 null 时 [RouteScope.GITHUB_ONLY] 的通道会被剔除。
+         */
+        fun mirrorsFor(githubUrl: String?): List<DownloadRoute> =
+            if (githubUrl.isNullOrBlank()) BUILT_IN_MIRRORS else BUILT_IN_MIRRORS + GHFAST
 
         /** 补全并校验用户填的前缀，非法时返回空串 */
         fun normalizedPrefix(raw: String): String {
@@ -83,8 +122,11 @@ data class AccelerationSettings(
     /**
      * 当前设置下的候选通道（直连永远保留兜底）。
      * 私有仓库一律只走直连，避免产物数据经过第三方。
+     *
+     * @param githubUrl 该下载在 github.com 上的稳定地址；只有发行版有。
+     *        非空时 ghfast 才会进入候选（它只认 github.com 原始地址）。
      */
-    fun candidateRoutes(isPrivateRepo: Boolean): List<DownloadRoute> = when (mode) {
+    fun candidateRoutes(isPrivateRepo: Boolean, githubUrl: String? = null): List<DownloadRoute> = when (mode) {
         RouteMode.DIRECT -> listOf(DownloadRoute.DIRECT)
 
         RouteMode.CUSTOM -> {
@@ -95,7 +137,7 @@ data class AccelerationSettings(
 
         RouteMode.SMART ->
             if (isPrivateRepo) listOf(DownloadRoute.DIRECT)
-            else listOf(DownloadRoute.DIRECT) + DownloadRoute.BUILT_IN_MIRRORS
+            else listOf(DownloadRoute.DIRECT) + DownloadRoute.mirrorsFor(githubUrl)
     }
 
     /**
@@ -104,13 +146,14 @@ data class AccelerationSettings(
      */
     fun savedPlan(
         isPrivateRepo: Boolean,
+        githubUrl: String? = null,
         nowMillis: Long = System.currentTimeMillis(),
     ): List<ScoredRoute>? {
         val route = testedRoute ?: return null
         val testedAt = testedAtMillis ?: return null
         if (nowMillis - testedAt >= savedPlanValidMillis) return null
         if (isPrivateRepo && !route.isDirect) return null
-        if (route !in candidateRoutes(isPrivateRepo)) return null
+        if (route !in candidateRoutes(isPrivateRepo, githubUrl)) return null
         return listOf(ScoredRoute(route, maxOf(testedSpeed, 0.01)))
     }
 
@@ -207,17 +250,25 @@ object RouteProbe {
 
     /**
      * 逐条通道测速，返回按速度从快到慢排序的结果（失败的通道会被丢掉）。
+     *
+     * @param githubUrl 该下载在 github.com 上的稳定地址；ghfast 这类
+     *        [RouteScope.GITHUB_ONLY] 通道只能用它测。
      */
     suspend fun measureAll(
         routes: List<DownloadRoute>,
         signedUrl: String,
+        githubUrl: String? = null,
         /** 已知体积时从中间取样；未知就从头开始 */
         knownSize: Long? = null,
         onResult: (ScoredRoute) -> Unit = {},
     ): List<ScoredRoute> = coroutineScope {
         val results = routes.map { route ->
             async(Dispatchers.IO) {
-                measure(route, signedUrl, knownSize = knownSize)?.also(onResult)
+                val target = when (route.scope) {
+                    RouteScope.ANY -> signedUrl
+                    RouteScope.GITHUB_ONLY -> githubUrl ?: return@async null
+                }
+                measure(route, target, knownSize = knownSize)?.also(onResult)
             }
         }.mapNotNull { it.await() }
         results.sortedByDescending { it.speed }

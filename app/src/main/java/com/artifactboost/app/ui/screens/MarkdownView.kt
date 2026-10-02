@@ -6,8 +6,12 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -19,7 +23,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import com.artifactboost.app.ui.components.SkeletonBlock
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -42,18 +51,35 @@ import com.artifactboost.app.ui.theme.AppTheme
 /**
  * 轻量 Markdown 渲染，够用于 README：标题 / 段落 / 列表 / 代码块 / 引用 / 表格 / 分割线 / 图片。
  * 对应 iOS 版的 MarkdownView.swift（MarkdownParser + MarkdownInline + MarkdownContentView）。
+ *
+ * 两个容易踩的坑，这里都专门处理了：
+ *  - **badge / 行内图片**：形如 `[![alt](img)](link)`，或段落里夹着 `![](img)`，
+ *    必须渲染成图片，而不是把 `![alt](img)` 当成普通链接文字吐出来；
+ *  - **表格列对齐**：每行各画各的宽度，各列当然对不齐。这里先量出整列的内容宽度，
+ *    再让同一列所有单元格用同一个宽度，上下才会对齐。
  */
 
 sealed interface MDBlock {
     data class Heading(val level: Int, val text: String) : MDBlock
-    data class Paragraph(val text: String) : MDBlock
-    data class Bullet(val text: String, val indent: Int) : MDBlock
-    data class Ordered(val number: String, val text: String, val indent: Int) : MDBlock
-    data class Quote(val text: String) : MDBlock
+    data class Paragraph(val segments: List<MDInline>) : MDBlock
+    data class Bullet(val segments: List<MDInline>, val indent: Int) : MDBlock
+    data class Ordered(val number: String, val segments: List<MDInline>, val indent: Int) : MDBlock
+    data class Quote(val segments: List<MDInline>) : MDBlock
     data class Code(val language: String?, val content: String) : MDBlock
-    data class Table(val header: List<String>, val rows: List<List<String>>) : MDBlock
+    data class Table(val header: List<List<MDInline>>, val rows: List<List<List<MDInline>>>) : MDBlock
     data object Rule : MDBlock
     data class Image(val url: String, val alt: String) : MDBlock
+}
+
+/**
+ * 一段行内内容：要么是文字（交给 [MarkdownInline] 上样式），要么是一张图片。
+ *
+ * 之所以把图片单独拎出来，是因为 badge（ shields.io 那种）在 README 里随处可见，
+ * 它们必须能被真的画出来 —— 而 Compose 的 AnnotatedString 里塞不了异步加载的图片。
+ */
+sealed interface MDInline {
+    data class Text(val value: String) : MDInline
+    data class Picture(val url: String, val alt: String, val link: String?) : MDInline
 }
 
 object MarkdownParser {
@@ -85,8 +111,8 @@ object MarkdownParser {
                 continue
             }
 
-            // 分割线
-            if (line == "---" || line == "***" || line == "___") {
+            // 分割线（至少 3 个 -, *, _）
+            if (isRule(line)) {
                 blocks.add(MDBlock.Rule)
                 index += 1
                 continue
@@ -107,11 +133,11 @@ object MarkdownParser {
 
             // 表格
             if (line.contains("|") && index + 1 < lines.size && isTableSeparator(lines[index + 1])) {
-                val header = splitTableRow(line)
-                val rows = mutableListOf<List<String>>()
+                val header = parseInline(splitTableRow(line))
+                val rows = mutableListOf<List<List<MDInline>>>()
                 index += 2
                 while (index < lines.size && lines[index].contains("|")) {
-                    rows.add(splitTableRow(lines[index]))
+                    rows.add(parseInline(splitTableRow(lines[index])))
                     index += 1
                 }
                 blocks.add(MDBlock.Table(header, rows))
@@ -127,26 +153,17 @@ object MarkdownParser {
                     buffer.add(current.drop(1).trim())
                     index += 1
                 }
-                blocks.add(MDBlock.Quote(buffer.joinToString(" ")))
+                blocks.add(MDBlock.Quote(parseInlineText(buffer.joinToString(" "))))
                 continue
-            }
-
-            // 独占一行的图片
-            if (line.startsWith("![")) {
-                val image = parseImage(line)
-                if (image != null) {
-                    blocks.add(MDBlock.Image(image.first, image.second))
-                    index += 1
-                    continue
-                }
             }
 
             // 列表
             val marker = parseListMarker(raw)
             if (marker != null) {
+                val segments = parseInlineText(marker.text)
                 when (val kind = marker.kind) {
-                    is ListKind.Bullet -> blocks.add(MDBlock.Bullet(marker.text, marker.indent))
-                    is ListKind.Ordered -> blocks.add(MDBlock.Ordered(kind.number, marker.text, marker.indent))
+                    is ListKind.Bullet -> blocks.add(MDBlock.Bullet(segments, marker.indent))
+                    is ListKind.Ordered -> blocks.add(MDBlock.Ordered(kind.number, segments, marker.indent))
                 }
                 index += 1
                 continue
@@ -159,10 +176,11 @@ object MarkdownParser {
                 val current = lines[index]
                 val trimmed = current.trim()
                 if (trimmed.isEmpty() ||
+                    isRule(trimmed) ||
                     trimmed.startsWith("#") ||
                     trimmed.startsWith("```") ||
                     trimmed.startsWith(">") ||
-                    trimmed == "---" || trimmed == "***" || trimmed == "___" ||
+                    (trimmed.contains("|") && index + 1 < lines.size && isTableSeparator(lines[index + 1])) ||
                     parseListMarker(current) != null
                 ) {
                     break
@@ -170,10 +188,18 @@ object MarkdownParser {
                 buffer.add(trimmed)
                 index += 1
             }
-            blocks.add(MDBlock.Paragraph(buffer.joinToString(" ")))
+            // 段落拼回一行：图片之间的换行不能变成空格，否则 badge 会连成一条缝
+            blocks.add(MDBlock.Paragraph(parseInlineParagraph(buffer)))
         }
 
         return blocks
+    }
+
+    private fun isRule(line: String): Boolean {
+        if (line.length < 3) return false
+        val ch = line[0]
+        if (ch != '-' && ch != '*' && ch != '_') return false
+        return line.length >= 3 && line.all { it == ch || it == ' ' } && line.count { it == ch } >= 3
     }
 
     private fun isTableSeparator(line: String): Boolean {
@@ -186,20 +212,46 @@ object MarkdownParser {
         var trimmed = line.trim()
         if (trimmed.startsWith("|")) trimmed = trimmed.substring(1)
         if (trimmed.endsWith("|")) trimmed = trimmed.dropLast(1)
-        return trimmed.split("|").map { it.trim() }
+        return splitOutsideCode(trimmed, '|').map { it.trim() }
     }
 
-    /** 返回 (url, alt) */
-    private fun parseImage(line: String): Pair<String, String>? {
-        val openAlt = line.indexOf('[')
-        val closeAlt = line.indexOf(']')
-        val openUrl = line.indexOf('(')
-        val closeUrl = line.lastIndexOf(')')
-        if (openAlt < 0 || closeAlt < 0 || openUrl < 0 || closeUrl < 0) return null
-        if (!(openAlt < closeAlt && closeAlt < openUrl && openUrl < closeUrl)) return null
-        val alt = line.substring(openAlt + 1, closeAlt)
-        val url = line.substring(openUrl + 1, closeUrl)
-        return url to alt
+    /** 按分隔符切分，但跳过 `` ` `` 代码段里的分隔符（列名里常有 `a|b`） */
+    private fun splitOutsideCode(source: String, separator: Char): List<String> {
+        val result = mutableListOf<String>()
+        val current = StringBuilder()
+        var inCode = false
+        for (ch in source) {
+            when {
+                ch == '`' -> {
+                    inCode = !inCode
+                    current.append(ch)
+                }
+                ch == separator && !inCode -> {
+                    result.add(current.toString())
+                    current.setLength(0)
+                }
+                else -> current.append(ch)
+            }
+        }
+        result.add(current.toString())
+        return result
+    }
+
+    /** 表格单元格：逐个转成行内序列 */
+    private fun parseInline(cells: List<String>): List<List<MDInline>> = cells.map { parseInlineText(it) }
+
+    private fun parseInlineText(text: String): List<MDInline> = InlineScanner(text).scan()
+
+    /**
+     * 段落专用：把多行合并时，只要其中一行是「独占一行的图片」，就单独当作一个图片段，
+     * 不参与后续的文字拼接 —— 否则 badge 之间会被塞进空格，看起来像乱码。
+     */
+    private fun parseInlineParagraph(lines: List<String>): List<MDInline> {
+        val out = mutableListOf<MDInline>()
+        for (line in lines) {
+            out.addAll(parseInlineText(line))
+        }
+        return out
     }
 
     private sealed interface ListKind {
@@ -236,6 +288,159 @@ object MarkdownParser {
     }
 }
 
+/**
+ * 行内扫描器：把文字切成「文本 / 图片」两态。
+ *
+ * 支持的图片写法：
+ *  - `![alt](url)`                     → 直接图片
+ *  - `[![alt](img)](link)`             → 可点击的 badge（README 里最常见的形态）
+ *  - `<img src="..." alt="...">`       → 部分 README 会直接写 HTML（含 width/height）
+ *
+ * 普通链接 `[文字](url)` 仍然走文字路径，不会误判成图片。
+ */
+internal class InlineScanner(private val source: String) {
+
+    fun scan(): List<MDInline> {
+        val out = mutableListOf<MDInline>()
+        val text = StringBuilder()
+        var i = 0
+
+        fun flush() {
+            if (text.isNotEmpty()) {
+                out.add(MDInline.Text(text.toString()))
+                text.setLength(0)
+            }
+        }
+
+        while (i < source.length) {
+            // HTML <img ...>
+            if (source[i] == '<') {
+                val close = source.indexOf('>', i)
+                if (close > i) {
+                    val tag = source.substring(i, close + 1)
+                    val img = parseHtmlImage(tag)
+                    if (img != null) {
+                        flush()
+                        out.add(img)
+                        i = close + 1
+                        continue
+                    }
+                }
+            }
+
+            // [![alt](img)](link) —— badge
+            if (source.startsWith("[![", i)) {
+                val badge = parseBadge(source, i)
+                if (badge != null) {
+                    flush()
+                    out.add(badge.first)
+                    i = badge.second
+                    continue
+                }
+            }
+
+            // ![alt](img)
+            if (source[i] == '!' && i + 1 < source.length && source[i + 1] == '[') {
+                val img = parseImageAt(source, i)
+                if (img != null) {
+                    flush()
+                    out.add(img.first)
+                    i = img.second
+                    continue
+                }
+            }
+
+            text.append(source[i])
+            i += 1
+        }
+        flush()
+        return out
+    }
+
+    /** `[![alt](img)](link)` → 可点击图片 + 消费长度 */
+    private fun parseBadge(src: String, start: Int): Pair<MDInline, Int>? {
+        // 期望结构：[![ ... ]( ... )]( ... )
+        if (!src.startsWith("[![", start)) return null
+        val altEnd = src.indexOf(']', start + 3)
+        if (altEnd < 0) return null
+        val alt = src.substring(start + 3, altEnd)
+        if (altEnd + 1 >= src.length || src[altEnd + 1] != '(') return null
+        val imgUrlEnd = src.indexOf(')', altEnd + 2)
+        if (imgUrlEnd < 0) return null
+        val imgUrl = src.substring(altEnd + 2, imgUrlEnd)
+        // 紧随其后应当是 ](link)
+        if (imgUrlEnd + 1 >= src.length || src[imgUrlEnd + 1] != ']') return null
+        val consumedWithLink: Int
+        val link: String?
+        if (imgUrlEnd + 2 < src.length && src[imgUrlEnd + 2] == '(') {
+            val linkEnd = src.indexOf(')', imgUrlEnd + 3)
+            if (linkEnd < 0) return null
+            link = src.substring(imgUrlEnd + 3, linkEnd)
+            consumedWithLink = linkEnd + 1
+        } else {
+            link = null
+            consumedWithLink = imgUrlEnd + 2
+        }
+        return MDInline.Picture(imgUrl.trim(), alt, link) to consumedWithLink
+    }
+
+    /** `![alt](url)` → 图片 + 消费长度 */
+    private fun parseImageAt(src: String, start: Int): Pair<MDInline, Int>? {
+        val altStart = start + 2
+        val altEnd = src.indexOf(']', altStart)
+        if (altEnd < 0) return null
+        if (altEnd + 1 >= src.length || src[altEnd + 1] != '(') return null
+        val urlStart = altEnd + 2
+        val urlEnd = findClosingParen(src, urlStart)
+        if (urlEnd < 0) return null
+        val alt = src.substring(altStart, altEnd)
+        val url = parseUrlAndTitle(src.substring(urlStart, urlEnd))
+            ?: return null
+        return MDInline.Picture(url, alt, null) to urlEnd + 1
+    }
+
+    /** 链接 URL 可能带标题：`url "title"`，也可能带空格（GitHub 的 shields 地址偶尔如此） */
+    private fun parseUrlAndTitle(body: String): String? {
+        var value = body.trim()
+        if (value.isEmpty()) return null
+        // 去掉 markdown 的可选标题部分
+        val quoted = value.indexOf('"')
+        if (quoted > 0) value = value.substring(0, quoted).trim()
+        if (value.startsWith("<") && value.endsWith(">")) value = value.drop(1).dropLast(1)
+        return value.ifEmpty { null }
+    }
+
+    /** URL 里可能含括号（少数 shields 地址），按配对计数找真正的右括号 */
+    private fun findClosingParen(src: String, from: Int): Int {
+        var depth = 1
+        var i = from
+        while (i < src.length) {
+            when (src[i]) {
+                '(' -> depth++
+                ')' -> {
+                    depth--
+                    if (depth == 0) return i
+                }
+            }
+            i += 1
+        }
+        return -1
+    }
+
+    /** `<img src="..." alt="..." width="...">` */
+    private fun parseHtmlImage(tag: String): MDInline.Picture? {
+        if (!tag.startsWith("<img", ignoreCase = true)) return null
+        val src = attr(tag, "src") ?: return null
+        val alt = attr(tag, "alt").orEmpty()
+        return MDInline.Picture(src, alt, null)
+    }
+
+    private fun attr(tag: String, name: String): String? {
+        val pattern = Regex("""$name\s*=\s*(["'])(.*?)\1""", RegexOption.IGNORE_CASE)
+        return pattern.find(tag)?.groupValues?.get(2)
+    }
+}
+
 /** 把 `**粗**`、`` `代码` ``、`[文字](链接)` 解析为 AnnotatedString */
 object MarkdownInline {
 
@@ -251,6 +456,24 @@ object MarkdownInline {
 
         while (index < n) {
             val remainder = text.substring(index)
+
+            // ***粗斜*** / **粗**
+            if (remainder.startsWith("***")) {
+                val end = remainder.substring(3).indexOf("***")
+                if (end >= 0) {
+                    val inner = remainder.substring(3, 3 + end)
+                    withStyle(
+                        SpanStyle(
+                            fontSize = baseFontSize.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontStyle = FontStyle.Italic,
+                            color = baseColor,
+                        ),
+                    ) { append(inner) }
+                    index += 3 + end + 3
+                    continue
+                }
+            }
 
             if (remainder.startsWith("**")) {
                 val end = remainder.substring(2).indexOf("**")
@@ -282,7 +505,7 @@ object MarkdownInline {
                 }
             }
 
-            if (remainder.startsWith("[") || remainder.startsWith("![")) {
+            if (remainder.startsWith("[")) {
                 val link = parseLink(remainder)
                 if (link != null) {
                     withStyle(
@@ -309,20 +532,8 @@ object MarkdownInline {
 
     private fun parseLink(source: String): Link? {
         var work = source
-        var offset = 0
-        when {
-            work.startsWith("![") -> {
-                work = work.drop(2)
-                offset = 2
-            }
-
-            work.startsWith("[") -> {
-                work = work.drop(1)
-                offset = 1
-            }
-
-            else -> return null
-        }
+        if (!work.startsWith("[")) return null
+        work = work.drop(1)
         val closeBracket = work.indexOf(']')
         if (closeBracket < 0) return null
         val label = work.substring(0, closeBracket)
@@ -332,14 +543,28 @@ object MarkdownInline {
         val closeParen = work.indexOf(')', urlStart)
         if (closeParen < 0) return null
         val url = work.substring(urlStart, closeParen)
-        return Link(label, url, offset + closeParen + 1)
+        return Link(label, url, 1 + closeParen + 1)
     }
 }
 
 @Composable
 fun MarkdownContent(markdown: String, modifier: Modifier = Modifier) {
-    val colors = AppTheme.colors
-    val blocks = remember(markdown) { MarkdownParser.parse(markdown) }
+    // 解析必须离开主线程。
+    //
+    // 老实现是 remember(markdown) { MarkdownParser.parse(...) } —— 那是在
+    // composition 阶段同步跑解析。超长 README（动辄几百 KB、几千行）会把主线程顶住，
+    // 表现就是「进了仓库详情页后，点返回没反应、要等一两秒才跳走」。
+    // 改成 produceState + withContext(Dispatchers.Default)，解析期间先画骨架屏，
+    // 主线程始终空闲，返回手势随时可响应。
+    val blocks by produceState<List<MDBlock>>(initialValue = emptyList(), markdown) {
+        value = withContext(Dispatchers.Default) { MarkdownParser.parse(markdown) }
+    }
+
+    if (blocks.isEmpty()) {
+        // 解析期间占位：保证导航随时可返回，不会出现一片空白
+        Box(modifier = modifier) { SkeletonBlock(6) }
+        return
+    }
 
     Column(
         modifier = modifier,
@@ -367,21 +592,23 @@ private fun MarkdownBlockView(block: MDBlock) {
             )
         }
 
-        is MDBlock.Paragraph -> Text(
-            text = MarkdownInline.render(block.text, 14f, FontWeight.Normal, colors.muted, colors),
-            lineHeight = 20.sp,
+        is MDBlock.Paragraph -> MarkdownSegmentFlow(
+            segments = block.segments,
+            fontSize = 14f,
+            weight = FontWeight.Normal,
+            color = colors.muted,
         )
 
         is MDBlock.Bullet -> MarkdownListRow(
             bullet = "•",
-            text = block.text,
+            segments = block.segments,
             indent = block.indent,
             monospaced = false,
         )
 
         is MDBlock.Ordered -> MarkdownListRow(
             bullet = "${block.number}.",
-            text = block.text,
+            segments = block.segments,
             indent = block.indent,
             monospaced = true,
         )
@@ -396,11 +623,15 @@ private fun MarkdownBlockView(block: MDBlock) {
                     .heightIn(min = 20.dp)
                     .background(colors.border),
             )
-            Text(
-                text = MarkdownInline.render(block.text, 14f, FontWeight.Normal, colors.subtle, colors),
-                fontStyle = FontStyle.Italic,
-                lineHeight = 20.sp,
-            )
+            Box(Modifier.weight(1f)) {
+                MarkdownSegmentFlow(
+                    segments = block.segments,
+                    fontSize = 14f,
+                    weight = FontWeight.Normal,
+                    color = colors.subtle,
+                    fontStyle = FontStyle.Italic,
+                )
+            }
         }
 
         is MDBlock.Code -> Column(
@@ -442,10 +673,102 @@ private fun MarkdownBlockView(block: MDBlock) {
     }
 }
 
+/**
+ * 行内序列的排版容器。
+ *
+ * 纯文字时就是一个普通 [Text]，省掉一层布局；
+ * 一旦混进图片（badge），就换成 [androidx.compose.foundation.layout.FlowRow] 风格的手工换行 ——
+ * 用 Row + 自动换行把 badge 一个挨一个排好，而不是让它们排成一条长线被裁掉。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun MarkdownSegmentFlow(
+    segments: List<MDInline>,
+    fontSize: Float,
+    weight: FontWeight,
+    color: Color,
+    fontStyle: FontStyle = FontStyle.Normal,
+) {
+    val colors = AppTheme.colors
+    val hasPicture = segments.any { it is MDInline.Picture }
+
+    if (!hasPicture) {
+        val text = segments.filterIsInstance<MDInline.Text>().joinToString("") { it.value }
+        Text(
+            text = MarkdownInline.render(text, fontSize, weight, color, colors),
+            fontSize = fontSize.sp,
+            fontStyle = fontStyle,
+            lineHeight = (fontSize + 6f).sp,
+        )
+        return
+    }
+
+    // 混排：按「文字块 / 图片块」顺序依次摆开，图片之间自动换行
+    androidx.compose.foundation.layout.FlowRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        segments.forEach { segment ->
+            when (segment) {
+                is MDInline.Text -> {
+                    if (segment.value.isBlank()) return@forEach
+                    Text(
+                        text = MarkdownInline.render(segment.value, fontSize, weight, color, colors),
+                        fontSize = fontSize.sp,
+                        fontStyle = fontStyle,
+                        lineHeight = (fontSize + 6f).sp,
+                    )
+                }
+
+                is MDInline.Picture -> MarkdownBadge(
+                    url = segment.url,
+                    alt = segment.alt,
+                )
+            }
+        }
+    }
+}
+
+/** 内联 badge / 图片：限高以免撑破版面，加载失败就退回 alt 文字 */
+@Composable
+private fun MarkdownBadge(url: String, alt: String) {
+    val colors = AppTheme.colors
+    val target = remember(url) { resolveMarkdownUrl(url) }
+
+    if (target == null) {
+        MarkdownRelativeImageHint(alt)
+        return
+    }
+
+    SubcomposeAsyncImage(
+        model = target,
+        contentDescription = alt,
+        contentScale = ContentScale.Fit,
+        modifier = Modifier
+            .heightIn(max = 28.dp)
+            .widthIn(max = 220.dp)
+            .clip(RoundedCornerShape(4.dp)),
+        loading = {
+            Box(
+                modifier = Modifier
+                    .width(56.dp)
+                    .height(20.dp)
+                    .background(colors.border.copy(alpha = 0.25f), RoundedCornerShape(4.dp)),
+            )
+        },
+        error = {
+            if (alt.isNotEmpty()) {
+                Text(alt, fontSize = 11.sp, color = colors.subtle)
+            }
+        },
+    )
+}
+
 @Composable
 private fun MarkdownListRow(
     bullet: String,
-    text: String,
+    segments: List<MDInline>,
     indent: Int,
     monospaced: Boolean,
 ) {
@@ -462,16 +785,54 @@ private fun MarkdownListRow(
             color = colors.subtle,
             fontFamily = if (monospaced) FontFamily.Monospace else FontFamily.Default,
         )
-        Text(
-            text = MarkdownInline.render(text, 14f, FontWeight.Normal, colors.muted, colors),
-            lineHeight = 20.sp,
-        )
+        Box(Modifier.weight(1f)) {
+            MarkdownSegmentFlow(
+                segments = segments,
+                fontSize = 14f,
+                weight = FontWeight.Normal,
+                color = colors.muted,
+            )
+        }
     }
 }
 
+// MARK: - 表格
+
+/**
+ * 表格：先量宽，再统一绘制。
+ *
+ * 旧实现每行各自 `widthIn(min = 80.dp, max = 220.dp)`，内容长短不同列宽就不同，
+ * 于是「上下格没对齐」。正确做法是 ——
+ * 先按整列里最宽的那个单元格定出列宽，再让该列所有行都用这个宽度。
+ */
 @Composable
-private fun MarkdownTableView(header: List<String>, rows: List<List<String>>) {
+private fun MarkdownTableView(header: List<List<MDInline>>, rows: List<List<List<MDInline>>>) {
     val colors = AppTheme.colors
+
+    val columnCount = maxOf(
+        header.size,
+        rows.maxOfOrNull { it.size } ?: 0,
+    )
+    if (columnCount == 0) return
+
+    // 量宽：按字符数估算每列需要的宽度（中文字符算 2 个宽度）
+    val columnWidths = remember(header, rows) {
+        val widths = IntArray(columnCount) { MIN_COLUMN_CHARS }
+        fun measure(cells: List<List<MDInline>>) {
+            cells.forEachIndexed { index, cell ->
+                if (index >= columnCount) return@forEachIndexed
+                val chars = visualLength(plainText(cell))
+                if (chars > widths[index]) widths[index] = chars
+            }
+        }
+        measure(header)
+        rows.forEach { measure(it) }
+        widths.map { chars ->
+            // 每字符约 7dp，再留出左右 padding
+            (chars * 7 + 24).coerceIn(72, 260)
+        }
+    }
+
     Column(
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
@@ -479,39 +840,66 @@ private fun MarkdownTableView(header: List<String>, rows: List<List<String>>) {
             .background(colors.surface),
     ) {
         Row(Modifier.horizontalScroll(rememberScrollState())) {
-            TableRowView(header, isHeader = true)
+            TableRowView(
+                cells = header,
+                columnCount = columnCount,
+                columnWidths = columnWidths,
+                isHeader = true,
+                isLastRow = false,
+            )
         }
-        rows.forEach { cells ->
+        rows.forEachIndexed { rowIndex, cells ->
             Hairline()
             Row(Modifier.horizontalScroll(rememberScrollState())) {
-                TableRowView(cells, isHeader = false)
+                TableRowView(
+                    cells = cells,
+                    columnCount = columnCount,
+                    columnWidths = columnWidths,
+                    isHeader = false,
+                    isLastRow = rowIndex == rows.lastIndex,
+                )
             }
         }
     }
 }
 
 @Composable
-private fun TableRowView(cells: List<String>, isHeader: Boolean) {
+private fun TableRowView(
+    cells: List<List<MDInline>>,
+    columnCount: Int,
+    columnWidths: List<Int>,
+    isHeader: Boolean,
+    isLastRow: Boolean,
+) {
     val colors = AppTheme.colors
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        cells.forEachIndexed { index, cell ->
-            Text(
-                text = MarkdownInline.render(
-                    cell,
-                    if (isHeader) 12f else 12f,
-                    if (isHeader) FontWeight.Bold else FontWeight.Normal,
-                    if (isHeader) colors.strongText else colors.muted,
-                    colors,
-                ),
+    // 用 IntrinsicSize.Min 让同一行里所有单元格等高、内容垂直居中
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .background(if (isHeader) colors.canvas else Color.Transparent)
+            .height(IntrinsicSize.Min),
+    ) {
+        for (index in 0 until columnCount) {
+            val cell = cells.getOrNull(index).orEmpty()
+            Box(
                 modifier = Modifier
-                    .widthIn(min = 80.dp, max = 220.dp)
+                    .width(columnWidths[index].dp)
                     .padding(horizontal = 10.dp, vertical = 7.dp),
-            )
-            if (index < cells.size - 1) {
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                MarkdownSegmentFlow(
+                    segments = cell,
+                    fontSize = 12f,
+                    weight = if (isHeader) FontWeight.Bold else FontWeight.Normal,
+                    color = if (isHeader) colors.strongText else colors.muted,
+                )
+            }
+            if (index < columnCount - 1) {
+                // 竖线撑满整行高度，行与行之间才不会出现断口
                 Box(
                     Modifier
                         .width(0.5.dp)
-                        .height(28.dp)
+                        .fillMaxHeight()
                         .background(colors.border),
                 )
             }
@@ -519,50 +907,95 @@ private fun TableRowView(cells: List<String>, isHeader: Boolean) {
     }
 }
 
+private const val MIN_COLUMN_CHARS = 6
+
+/** 估算显示宽度：CJK 字符按 2 个宽度算，其余按 1 */
+private fun visualLength(text: String): Int {
+    var width = 0
+    for (ch in text) {
+        width += if (ch.code > 0x2E80) 2 else 1
+    }
+    return width
+}
+
+private fun plainText(cells: List<MDInline>): String =
+    cells.joinToString("") { segment ->
+        when (segment) {
+            is MDInline.Text -> segment.value
+            is MDInline.Picture -> segment.alt
+        }
+    }
+
+// MARK: - 图片
+
 @Composable
 private fun MarkdownImageView(url: String, alt: String) {
     val colors = AppTheme.colors
-    val isAbsolute = url.startsWith("http://") || url.startsWith("https://")
+    val target = remember(url) { resolveMarkdownUrl(url) }
 
-    if (isAbsolute) {
-        SubcomposeAsyncImage(
-            model = url,
-            contentDescription = alt,
-            contentScale = ContentScale.Fit,
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp)),
-            loading = {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(140.dp)
-                        .background(colors.border.copy(alpha = 0.3f)),
-                    contentAlignment = Alignment.Center,
-                ) { CircularProgressIndicator(modifier = Modifier.width(22.dp), strokeWidth = 2.dp) }
-            },
-            error = {
-                Text(
-                    if (alt.isEmpty()) "图片加载失败" else alt,
-                    fontSize = 12.sp,
-                    color = colors.subtle,
-                )
-            },
-        )
-    } else {
-        // README 里相对路径的图片没法直接加载，提示一下而不是留个空白
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
-                .background(colors.canvas)
-                .padding(10.dp),
-        ) {
+    if (target == null) {
+        MarkdownRelativeImageHint(alt)
+        return
+    }
+
+    SubcomposeAsyncImage(
+        model = target,
+        contentDescription = alt,
+        contentScale = ContentScale.Fit,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp)),
+        loading = {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(140.dp)
+                    .background(colors.border.copy(alpha = 0.3f)),
+                contentAlignment = Alignment.Center,
+            ) { CircularProgressIndicator(modifier = Modifier.width(22.dp), strokeWidth = 2.dp) }
+        },
+        error = {
             Text(
-                if (alt.isEmpty()) "README 内的相对路径图片" else "$alt（相对路径）",
+                if (alt.isEmpty()) "图片加载失败" else alt,
                 fontSize = 12.sp,
                 color = colors.subtle,
             )
-        }
+        },
+    )
+}
+
+@Composable
+private fun MarkdownRelativeImageHint(alt: String) {
+    val colors = AppTheme.colors
+    // README 里相对路径的图片没法直接加载，提示一下而不是留个空白
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(colors.canvas)
+            .padding(10.dp),
+    ) {
+        Text(
+            if (alt.isEmpty()) "README 内的相对路径图片" else "$alt（相对路径）",
+            fontSize = 12.sp,
+            color = colors.subtle,
+        )
+    }
+}
+
+/**
+ * README 里的图片地址常见几种形态，统一归一化：
+ *  - `https://...` / `http://...` 直接用；
+ *  - `//host/path` 补成 https；
+ *  - `data:` 这类内嵌资源没法给 Coil，返回 null 让它走占位提示。
+ */
+private fun resolveMarkdownUrl(url: String): String? {
+    val trimmed = url.trim()
+    if (trimmed.isEmpty()) return null
+    return when {
+        trimmed.startsWith("https://") || trimmed.startsWith("http://") -> trimmed
+        trimmed.startsWith("//") -> "https:$trimmed"
+        trimmed.startsWith("data:") -> null
+        else -> null
     }
 }

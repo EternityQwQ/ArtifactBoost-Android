@@ -77,7 +77,7 @@ data class ArtifactsResponse(
     val artifacts: List<GHArtifact> = emptyList(),
 )
 
-/** 正式版（Release） */
+/** 发行版（Release） */
 @Serializable
 data class GHRelease(
     val id: Long,

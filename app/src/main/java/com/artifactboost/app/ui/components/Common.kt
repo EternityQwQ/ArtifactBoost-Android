@@ -37,7 +37,7 @@ import androidx.compose.ui.unit.sp
 import com.artifactboost.app.ui.theme.AppTheme
 import com.artifactboost.app.ui.theme.languageColor
 
-/** 圆角图标（GitHub 移动端的仓库 / 文件图标风格） */
+/** 圆角图标（GitHub 移动端的仓库 / 文件图标风格，圆角走 MD3 shape scale） */
 @Composable
 fun IconBadge(
     icon: ImageVector,
@@ -47,7 +47,8 @@ fun IconBadge(
     Box(
         modifier = Modifier
             .size(size)
-            .clip(RoundedCornerShape(size * 0.3f))
+            // MD3：容器形状统一从小号圆角取，不再各写各的
+            .clip(MaterialTheme.shapes.small)
             .background(color.copy(alpha = 0.12f)),
         contentAlignment = Alignment.Center,
     ) {
@@ -60,7 +61,13 @@ fun IconBadge(
     }
 }
 
-/** 灰底小胶囊（GitHub 的 label / badge 风格） */
+/**
+ * 灰底小胶囊（GitHub 的 label / badge 风格）。
+ *
+ * MD3 化的做法：形状与内边距对齐 MD3 `AssistChip`，
+ * 但保留「按语义色自定义」的能力 —— 运行状态红/绿这类信息色
+ * 不该被主题色替换掉。
+ */
 @Composable
 fun StatusPill(
     text: String,
@@ -71,7 +78,7 @@ fun StatusPill(
         modifier = Modifier
             .clip(CircleShape)
             .background(color.copy(alpha = 0.14f))
-            .padding(horizontal = 8.dp, vertical = 3.dp),
+            .padding(horizontal = 9.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp),
     ) {
@@ -80,7 +87,8 @@ fun StatusPill(
         }
         Text(
             text = text,
-            fontSize = 11.sp,
+            // MD3 labelSmall：带字距的小标签
+            style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.SemiBold,
             color = color,
         )
@@ -101,7 +109,7 @@ fun LanguageLabel(language: String) {
                 .clip(CircleShape)
                 .background(languageColor(language, colors)),
         )
-        Text(language, fontSize = 11.sp, color = colors.muted)
+        Text(language, style = MaterialTheme.typography.labelSmall, color = colors.muted)
     }
 }
 
@@ -114,7 +122,7 @@ fun StatLabel(icon: ImageVector, text: String) {
         horizontalArrangement = Arrangement.spacedBy(3.dp),
     ) {
         Icon(icon, contentDescription = null, tint = colors.muted, modifier = Modifier.size(12.dp))
-        Text(text, fontSize = 11.sp, color = colors.muted)
+        Text(text, style = MaterialTheme.typography.labelSmall, color = colors.muted)
     }
 }
 
@@ -135,11 +143,11 @@ fun EmptyStateView(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Icon(icon, contentDescription = null, tint = colors.subtle, modifier = Modifier.size(34.dp))
-        Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = colors.muted)
+        Text(title, style = MaterialTheme.typography.titleSmall, color = colors.muted)
         if (message != null) {
             Text(
                 text = message,
-                fontSize = 12.sp,
+                style = MaterialTheme.typography.bodySmall,
                 color = colors.subtle,
                 textAlign = TextAlign.Center,
             )
@@ -147,23 +155,29 @@ fun EmptyStateView(
     }
 }
 
-/** 卡片容器：浅色/深色下都有清晰边界（GitHub 的 box 风格） */
+/**
+ * 卡片容器 —— MD3 化的关键一处。
+ *
+ * 老实现是「自己画 Box + 背景 + 1dp 描边」，视觉上没问题，
+ * 但它拿不到 MD3 的层级色（surfaceContainer*）、也没有 MD3 卡片的高度语义。
+ * 改成 MD3 `OutlinedCard`：形状、描边、容器色都走主题，
+ * 深浅色切换与动态取色都会自动跟上。
+ */
 @Composable
 fun CardSurface(
     modifier: Modifier = Modifier,
     padding: androidx.compose.ui.unit.Dp = 14.dp,
     content: @Composable () -> Unit,
 ) {
-    val colors = AppTheme.colors
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(colors.surface)
-            .border(1.dp, colors.border, RoundedCornerShape(12.dp))
-            .padding(padding),
+    androidx.compose.material3.OutlinedCard(
+        modifier = modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        colors = androidx.compose.material3.CardDefaults.outlinedCardColors(
+            containerColor = AppTheme.colors.surface,
+        ),
+        border = androidx.compose.foundation.BorderStroke(1.dp, AppTheme.colors.border),
     ) {
-        content()
+        Box(modifier = Modifier.padding(padding)) { content() }
     }
 }
 
@@ -179,14 +193,14 @@ fun InlineBanner(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
+            .clip(MaterialTheme.shapes.small)
             .background(color.copy(alpha = 0.1f))
-            .border(1.dp, color.copy(alpha = 0.3f), RoundedCornerShape(10.dp))
+            .border(1.dp, color.copy(alpha = 0.3f), MaterialTheme.shapes.small)
             .padding(12.dp),
         horizontalArrangement = Arrangement.spacedBy(9.dp),
     ) {
         Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(16.dp))
-        Text(text, fontSize = 13.sp, color = colors.muted)
+        Text(text, style = MaterialTheme.typography.bodySmall, color = colors.muted)
     }
 }
 
@@ -201,21 +215,26 @@ fun IconBadgeButton(
     androidx.compose.material3.OutlinedButton(
         onClick = onClick,
         modifier = modifier.height(40.dp),
-        shape = RoundedCornerShape(10.dp),
+        shape = MaterialTheme.shapes.small,
         contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
     ) {
         Icon(icon, contentDescription = null, tint = colors.strongText, modifier = Modifier.size(18.dp))
     }
 }
 
-/** 0.5dp 分割线（GitHub 的 border 色） */
+/**
+ * 分割线 —— MD3 化的 `HorizontalDivider`。
+ *
+ * 老的 `Hairline` 是手画 0.5dp 的 Box；MD3 的 `HorizontalDivider`
+ * 自带正确的描边粗细与颜色语义（`outlineVariant`），
+ * 在高 DPI 屏上不会被四舍五入成 1px 实线、也不会在深色下偏亮。
+ */
 @Composable
 fun Hairline(modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(0.5.dp)
-            .background(AppTheme.colors.border),
+    androidx.compose.material3.HorizontalDivider(
+        modifier = modifier.fillMaxWidth(),
+        thickness = androidx.compose.ui.unit.Dp.Hairline,
+        color = AppTheme.colors.border,
     )
 }
 

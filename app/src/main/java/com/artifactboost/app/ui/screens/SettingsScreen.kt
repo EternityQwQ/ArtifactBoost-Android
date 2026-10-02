@@ -450,7 +450,8 @@ fun SettingsScreen() {
                             }
                             Hairline()
                             Text(
-                                "智能加速与自定义通道可能让产物数据经过第三方中转，私有仓库会自动强制走直连。Token 全程只在本机使用。",
+                                "智能加速与自定义通道可能让产物数据经过第三方中转，私有仓库会自动强制走直连。Token 全程只在本机使用。\n\n" +
+                                    "智能加速会额外尝试 ghfast.top —— 它只认 github.com 原始地址，因此仅对「发行版」附件生效；构建产物与日志仍走其它镜像。",
                                 fontSize = 11.sp,
                                 color = colors.subtle,
                             )

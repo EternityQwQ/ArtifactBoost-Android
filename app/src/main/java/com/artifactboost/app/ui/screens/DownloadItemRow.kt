@@ -16,6 +16,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Inventory2
+import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
@@ -67,7 +68,7 @@ fun sourceIcon(source: DownloadSource): ImageVector = when (source) {
     is DownloadSource.SourceArchive -> Icons.Filled.Code
 }
 
-/** 通用「可下载项」行：产物 / 构建日志 / 正式版附件 / 源码包 共用 */
+/** 通用「可下载项」行：产物 / 构建日志 / 发行版附件 / 源码包 共用 */
 @Composable
 fun DownloadItemRow(
     item: DownloadItem,
@@ -150,6 +151,7 @@ fun DownloadItemRow(
             }
 
             is DownloadState.Downloading -> {
+                var showDetails by remember { mutableStateOf(false) }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     val progress = state.progress
                     if (progress.totalBytes > 0) {
@@ -188,9 +190,34 @@ fun DownloadItemRow(
                         Text(summary, fontSize = 11.sp, color = colors.subtle)
                     }
 
-                    TextButton(onClick = { downloads.cancel(item) }) {
-                        Text("取消", fontSize = 12.sp, color = colors.red)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        TextButton(onClick = { showDetails = true }) {
+                            Icon(
+                                Icons.Filled.List,
+                                contentDescription = null,
+                                modifier = Modifier.size(15.dp),
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text("详细信息", fontSize = 12.sp)
+                        }
+                        Spacer(Modifier.weight(1f))
+                        TextButton(onClick = { downloads.cancel(item) }) {
+                            Text("取消", fontSize = 12.sp, color = colors.red)
+                        }
                     }
+                }
+
+                if (showDetails) {
+                    DownloadDetailsSheet(
+                        title = item.title,
+                        // 边下边看：面板里的数据每次都从最新一帧进度里取，
+                        // 所以重开面板看到的永远是「此刻」的明细。
+                        diagnostics = state.progress.diagnostics,
+                        onDismiss = { showDetails = false },
+                    )
                 }
             }
 

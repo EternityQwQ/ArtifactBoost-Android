@@ -230,7 +230,7 @@ fun SearchScreen(onOpenRepo: (GHRepo) -> Unit = {}) {
                         icon = Icons.Filled.Search,
                         title = if (keyword.isBlank()) "搜索全站仓库" else "没有搜到「$keyword」",
                         message = "在搜索框输入关键词后回车。公开仓库不需要你拥有它，" +
-                            "能搜到就能下载它的产物、正式版和源码。",
+                            "能搜到就能下载它的产物、发行版和源码。",
                     )
                 }
 

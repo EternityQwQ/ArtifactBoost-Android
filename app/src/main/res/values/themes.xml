@@ -1,8 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:tools="http://schemas.android.com/tools">
+    <!--
+      只作为「启动窗口」的骨架主题：真正的配色由 Compose 的 ArtifactBoostTheme 负责。
+      这里 key 的两件事：
+        1. 用 Material3 系 parent，避免启动瞬间闪出 Material2 的旧配色；
+        2. windowLightStatusBar 交给深色模式资源覆盖（values-night），
+           老实现把它写死成 true —— 深色模式下状态栏图标会变成深色贴深色背景，
+           看起来就是「状态栏图标消失了」。
+    -->
     <style name="Theme.ArtifactBoost" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/ab_window_background</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar" tools:targetApi="m">true</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="o_mr1">true</item>
     </style>
 </resources>

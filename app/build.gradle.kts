@@ -78,4 +78,7 @@ dependencies {
     implementation("io.coil-kt:coil-compose:2.7.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // 纯逻辑单测（解析器 / 调度原语），不需要真实网络
+    testImplementation("junit:junit:4.13.2")
 }

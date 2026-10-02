@@ -47,7 +47,7 @@ import com.artifactboost.app.ui.theme.AppTheme
 import com.artifactboost.app.util.formatTimestamp
 import androidx.compose.material.icons.filled.Inventory2
 /**
- * 正式版详情：附件 + 对应 tag 的源码包，都能加速下载。
+ * 发行版详情：附件 + 对应 tag 的源码包，都能加速下载。
  * 对应 iOS 版的 ReleaseDetailView。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -127,7 +127,7 @@ fun ReleaseDetailScreen(
                                 when {
                                     release.prerelease -> StatusPill("预发布", colors.orange)
                                     release.draft -> StatusPill("草稿", colors.muted)
-                                    else -> StatusPill("正式版", colors.green)
+                                    else -> StatusPill("发行版", colors.green)
                                 }
                             }
 
@@ -171,7 +171,7 @@ fun ReleaseDetailScreen(
             item {
                 ReleaseSectionHeader(
                     "附件（${release.assets.size}）",
-                    "正式版附件通常托管在 GitHub 的 CDN 上，同样支持多通道并发加速。",
+                    "发行版附件通常托管在 GitHub 的 CDN 上，同样支持多通道并发加速。",
                 )
             }
 

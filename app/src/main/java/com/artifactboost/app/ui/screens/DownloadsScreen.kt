@@ -103,7 +103,7 @@ fun DownloadsScreen() {
                     EmptyStateView(
                         icon = Icons.Filled.ArrowDownward,
                         title = "还没有下载任务",
-                        message = "去「仓库」里挑一个构建产物、正式版附件或源码包试试",
+                        message = "去「仓库」里挑一个构建产物、发行版附件或源码包试试",
                     )
                 }
             } else {

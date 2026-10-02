@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!--
+      深色模式：状态栏 / 导航栏要改成「深底浅图标」。
+      老实现只在 values/ 里写死 windowLightStatusBar=true，
+      深色模式下系统仍会画深色图标，贴在深色状态栏上等于看不见。
+    -->
+    <style name="Theme.ArtifactBoost" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/ab_window_background</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="m">false</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="o_mr1">false</item>
+    </style>
+</resources>

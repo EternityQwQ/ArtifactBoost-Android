@@ -42,6 +42,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -90,12 +91,12 @@ import kotlinx.coroutines.launch
 private enum class RepoTab(val title: String) {
     OVERVIEW("概览"),
     BUILDS("构建"),
-    RELEASES("正式版"),
+    RELEASES("发行版"),
     SOURCE("源码"),
 }
 
 /**
- * 仓库详情：概览（README）/ 构建产物 / 正式版 / 源码，都能加速下载。
+ * 仓库详情：概览（README）/ 构建产物 / 发行版 / 源码，都能加速下载。
  * 对应 iOS 版的 RepoDetailView。
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
@@ -131,6 +132,7 @@ fun RepoDetailScreen(
     var commitCount by remember { mutableStateOf<Int?>(null) }
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var isRefreshing by remember { mutableStateOf(false) }
 
     suspend fun load(target: RepoTab, force: Boolean = false) {
         val client = session.client.value ?: return
@@ -180,15 +182,21 @@ fun RepoDetailScreen(
         }
     }
 
-    androidx.compose.runtime.LaunchedEffect(tab) { load(tab) }
-    androidx.compose.runtime.LaunchedEffect(repo.fullName) {
-        val client = session.client.value ?: return@LaunchedEffect
+    /** 顶部「提交数」这类装饰性统计：下拉刷新时也要一起更新，否则会一直显示旧值 */
+    suspend fun loadHeaderStats() {
+        val client = session.client.value ?: return
         commitCount = try {
             client.commitCount(repo)
         } catch (_: Exception) {
             null
         }
     }
+
+    // 返回不被阻塞的关键：这些加载全部是异步协程，Compose 不会等在它们上面。
+    // 老问题出在 README 的 Markdown 解析跑在主线程 —— 那才是「点了返回没反应」的元凶，
+    // 与网络请求本身无关。解析已经挪到后台线程（见 MarkdownView）。
+    androidx.compose.runtime.LaunchedEffect(tab) { load(tab) }
+    androidx.compose.runtime.LaunchedEffect(repo.fullName) { loadHeaderStats() }
 
     Scaffold(
         containerColor = colors.canvas,
@@ -214,12 +222,25 @@ fun RepoDetailScreen(
             )
         },
     ) { padding ->
-        LazyColumn(
+        // 下拉刷新：把当前 tab 的内容 + 顶部统计一起刷掉
+        PullToRefreshBox(
+            isRefreshing = isRefreshing,
+            onRefresh = {
+                scope.launch {
+                    isRefreshing = true
+                    load(tab, force = true)
+                    loadHeaderStats()
+                    isRefreshing = false
+                }
+            },
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
-            contentPadding = PaddingValues(bottom = 24.dp),
         ) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = 24.dp),
+            ) {
             item {
                 RepoHeroHeader(repo = repo, commitCount = commitCount, branchCount = branches.size.takeIf { branchesLoaded })
             }
@@ -295,7 +316,7 @@ fun RepoDetailScreen(
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Text("README 读取失败", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = colors.muted)
                                     Text(
-                                        "跳过 README 直接看下面的构建 / 正式版 / 源码即可。",
+                                        "跳过 README 直接看下面的构建 / 发行版 / 源码即可。",
                                         fontSize = 12.sp,
                                         color = colors.subtle,
                                     )
@@ -305,7 +326,7 @@ fun RepoDetailScreen(
                                 EmptyStateView(
                                     icon = Icons.Filled.Description,
                                     title = "这个仓库没有 README",
-                                    message = "切到「构建」「正式版」「源码」开始加速下载。",
+                                    message = "切到「构建」「发行版」「源码」开始加速下载。",
                                 )
                             }
                         }
@@ -346,7 +367,7 @@ fun RepoDetailScreen(
                             CardSurface {
                                 EmptyStateView(
                                     icon = Icons.Filled.Warning,
-                                    title = "还没有正式版",
+                                    title = "还没有发行版",
                                     message = "该仓库没有发布过 Release",
                                 )
                             }
@@ -435,6 +456,7 @@ fun RepoDetailScreen(
                     }
                 }
             }
+            }
         }
     }
 }
@@ -469,7 +491,7 @@ private fun RepoHeroHeader(
         verticalArrangement = Arrangement.spacedBy(0.dp),
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            RepoAvatarView(isPrivate = repo.isPrivate, size = 46.dp)
+            RepoAvatarView(isPrivate = repo.isPrivate, size = 46.dp, owner = repo.owner)
 
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
@@ -626,7 +648,7 @@ fun ReleaseRowContent(release: GHRelease, onClick: () -> Unit) {
         when {
             release.prerelease -> StatusPill("预发布", colors.orange)
             release.draft -> StatusPill("草稿", colors.subtle)
-            else -> StatusPill("正式版", colors.green)
+            else -> StatusPill("发行版", colors.green)
         }
     }
 }

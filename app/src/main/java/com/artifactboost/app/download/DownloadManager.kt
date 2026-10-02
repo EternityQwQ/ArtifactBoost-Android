@@ -8,6 +8,7 @@ import com.artifactboost.app.data.DownloadSource
 import com.artifactboost.app.data.GitHubClient
 import com.artifactboost.app.data.GitHubException
 import com.artifactboost.app.data.RouteProbe
+import com.artifactboost.app.data.RouteScope
 import com.artifactboost.app.data.ScoredRoute
 import com.artifactboost.app.data.SessionManager
 import com.artifactboost.app.util.formatSpeed
@@ -228,16 +229,20 @@ class DownloadManager(
         signedUrl: String,
         settings: AccelerationSettings,
     ): File {
+        // ghfast 这类镜像只认 github.com 原始地址，套签名地址会被拒，
+        // 所以「这条通道该套哪个 URL」必须逐条算，不能统一用 signedUrl。
+        val githubUrl = item.source.ghfastEligibleUrl
+
         var plan: List<ScoredRoute>
         var note: String
 
-        val saved = settings.savedPlan(item.isPrivate)
+        val saved = settings.savedPlan(item.isPrivate, githubUrl)
         if (saved != null) {
             // 设置页已经测过速：直接用保存的最快通道
             plan = saved
             note = "${saved[0].route.name}（设置页测速 ${formatSpeed(saved[0].speed)}）"
         } else {
-            val candidates = settings.candidateRoutes(item.isPrivate)
+            val candidates = settings.candidateRoutes(item.isPrivate, githubUrl)
             if (candidates.size <= 1) {
                 plan = listOf(ScoredRoute(candidates[0], 1.0))
                 note = if (item.isPrivate && settings.mode == com.artifactboost.app.data.RouteMode.SMART) {
@@ -247,7 +252,12 @@ class DownloadManager(
                 }
             } else {
                 setRouteSummary(item.id, "正在测速选通道…")
-                val measured = RouteProbe.measureAll(candidates, signedUrl, knownSize = item.size)
+                val measured = RouteProbe.measureAll(
+                    candidates,
+                    signedUrl = signedUrl,
+                    githubUrl = githubUrl,
+                    knownSize = item.size,
+                )
                 val fastest = measured.firstOrNull()?.speed ?: 0.0
                 val viable = measured.filter { it.speed >= fastest * 0.4 }
                 if (viable.isEmpty()) {
@@ -271,9 +281,12 @@ class DownloadManager(
         // 真拿到 206 就自动升级成多线程，所以这里只是「别抱太大期望」的提示
         val mayChunk = item.source.supportsChunkedDownload
 
+        // 逐条通道算出它该用的 URL：ghfast 用 github.com 地址，其余用签名地址
+        val routeUrls = resolveRouteUrls(plan, signedUrl, githubUrl)
+
         return try {
             val result = engine.download(
-                signedUrl = signedUrl,
+                routeUrls = routeUrls,
                 routes = plan,
                 fileName = item.fileName,
                 connections = connections,
@@ -288,7 +301,7 @@ class DownloadManager(
             // 通道可能失效/被限流，整体回退直连再试一次
             if (!shouldRetry(e) || plan.none { !it.route.isDirect }) throw e
             val result = engine.download(
-                signedUrl = signedUrl,
+                routeUrls = listOf(DownloadRoute.DIRECT to signedUrl),
                 routes = listOf(ScoredRoute(DownloadRoute.DIRECT, 1.0)),
                 fileName = item.fileName,
                 connections = connections,
@@ -300,6 +313,31 @@ class DownloadManager(
             setRouteSummary(item.id, "直连（$note 失败已回退） · 平均 ${formatSpeed(result.averageSpeed)}")
             result.file
         }
+    }
+
+    /**
+     * 给每条通道算出实际请求的 URL。
+     *
+     * - [RouteScope.GITHUB_ONLY]（ghfast）：套 `https://github.com/...` 稳定地址；
+     *   若这次下载没有稳定地址，就把这条通道剔掉（避免送上去必然 400）。
+     * - 其余通道：套已签名的真实地址（原来的行为）。
+     */
+    private fun resolveRouteUrls(
+        plan: List<ScoredRoute>,
+        signedUrl: String,
+        githubUrl: String?,
+    ): List<Pair<DownloadRoute, String>> {
+        val urls = plan.mapNotNull { scored ->
+            when (scored.route.scope) {
+                RouteScope.ANY -> scored.route to scored.route.apply(signedUrl)
+                RouteScope.GITHUB_ONLY -> {
+                    val base = githubUrl ?: return@mapNotNull null
+                    scored.route to scored.route.apply(base)
+                }
+            }
+        }
+        // 全被剔掉（理论上不会，因为直连永远是 ANY）时至少保底直连
+        return urls.ifEmpty { listOf(DownloadRoute.DIRECT to signedUrl) }
     }
 
     private fun setRouteSummary(id: String, text: String) {

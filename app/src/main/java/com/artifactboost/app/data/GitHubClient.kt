@@ -171,7 +171,7 @@ class GitHubClient(val token: String) {
             mapOf("per_page" to "100"),
         ).artifacts
 
-    /** 某个仓库的正式版（Release） */
+    /** 某个仓库的发行版（Release） */
     suspend fun releases(repo: GHRepo): List<GHRelease> =
         get("repos/${repo.fullName}/releases", mapOf("per_page" to "50"))
 

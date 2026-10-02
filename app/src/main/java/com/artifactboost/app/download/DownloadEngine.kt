@@ -6,7 +6,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.Headers
@@ -29,6 +31,72 @@ data class DownloadProgress(
     val totalBytes: Long = 0,
     val fraction: Float = 0f,
     val speedBytesPerSecond: Double = 0.0,
+    /** 分段的实时明细，用于「详细信息」面板；未开始分段时为 null */
+    val diagnostics: DownloadDiagnostics? = null,
+)
+
+/** 单个分段的连接状态 */
+enum class SegmentState {
+    PENDING,
+    DOWNLOADING,
+    RETRYING,
+    DONE,
+    FAILED;
+
+    /** 展示用文案（「详细信息」面板里直接显示） */
+    val label: String
+        get() = when (this) {
+            PENDING -> "等待中"
+            DOWNLOADING -> "下载中"
+            RETRYING -> "重试中"
+            DONE -> "已完成"
+            FAILED -> "失败"
+        }
+}
+
+/**
+ * 一条「车道」的实时快照 —— 也就是一个 worker 当前正在啃的区间。
+ *
+ * 这是「详细信息」面板的数据源：用户在界面上一眼能看到哪条连接在跑、
+ * 跑到哪个区间、当前多快、有没有在重试、服务端回了什么状态码。
+ */
+data class LaneSnapshot(
+    val laneId: Int,
+    val routeName: String,
+    val url: String,
+    val start: Long,
+    val end: Long,
+    val downloaded: Long,
+    val speedBytesPerSecond: Double,
+    val state: SegmentState,
+    val attempt: Int,
+    val lastStatus: Int?,
+) {
+    val length: Long get() = end - start + 1
+    val fraction: Float
+        get() = if (length > 0) (downloaded.toFloat() / length).coerceIn(0f, 1f) else 0f
+}
+
+/** 某条通道的实测速度与占用情况 */
+data class RouteStats(
+    val name: String,
+    val speedBytesPerSecond: Double,
+    val isActive: Boolean,
+)
+
+/** 整次下载的诊断快照 */
+data class DownloadDiagnostics(
+    val lanes: List<LaneSnapshot>,
+    val targetLanes: Int,
+    /** 已经完成的切片数 / 累计切出的切片总数 */
+    val doneSlices: Int,
+    val totalSlices: Int,
+    val retries: Int,
+    val throttles: Int,
+    val splits: Int,
+    val routes: List<RouteStats>,
+    /** 当前正在用的下载地址（可复制） */
+    val activeUrl: String,
 )
 
 sealed class DownloadException(message: String) : IOException(message) {
@@ -62,8 +130,103 @@ private class RouteChannel(
     val client: OkHttpClient,
     var endpoints: List<String>,
     val speedHint: Double,
+    /** 展示名（直连 / gh-proxy.com / …），用于诊断面板 */
+    val name: String,
 ) {
     @Volatile var measuredSpeed: Double = speedHint
+    /** 是否本通道处于「被限流降额」状态 */
+    @Volatile var throttled: Boolean = false
+}
+
+/**
+ * 正在飞的请求登记簿。
+ *
+ * `call.cancel()` 是唯一能让阻塞中的 `execute()` 立刻抛 IOException 的手段；
+ * 光靠协程取消是不够的 —— 阻塞在 socket read 上的线程不会理会协程状态。
+ * 取消时把这里所有 Call 一起 cancel，所有线程才会「同时」退出，
+ * 而不是各自等到下一次读超时（120s）才反应过来。
+ */
+private class CallRegistry {
+    private val live = ConcurrentLinkedDeque<okhttp3.Call>()
+
+    fun register(call: okhttp3.Call) {
+        live.add(call)
+    }
+
+    fun release(call: okhttp3.Call) {
+        live.remove(call)
+    }
+
+    /** 取消所有在飞的请求 */
+    fun cancelAll() {
+        live.forEach { runCatching { it.cancel() } }
+        live.clear()
+    }
+}
+
+/**
+ * 车道状态看板：所有 worker 把自己的实时状态登记在这里，
+ * 由进度回调按 250ms 的既有节流节奏取走 —— 不额外起轮询、不加网络开销。
+ *
+ * 同时兼任「通道级并发配额」的计数：命中 429/503 的通道会被临时降额，
+ * 免得在同一根被限流的线路上继续加压、越限越死。
+ */
+private class LaneBoard(private val target: Int) {
+
+    private val lanes = java.util.concurrent.ConcurrentHashMap<Int, LaneSnapshot>()
+    private val routeNames = java.util.concurrent.ConcurrentHashMap<Int, String>()
+
+    /** 每条通道当前的惩罚计数：>0 表示被限流降额中 */
+    private val penalties = java.util.concurrent.ConcurrentHashMap<String, AtomicInteger>()
+
+    val doneSlices = AtomicInteger(0)
+    val totalSlices = AtomicInteger(0)
+    val retries = AtomicInteger(0)
+    val throttles = AtomicInteger(0)
+    val splits = AtomicInteger(0)
+
+    @Volatile var activeUrl: String = ""
+
+    fun update(snapshot: LaneSnapshot) {
+        lanes[snapshot.laneId] = snapshot
+    }
+
+    fun remove(laneId: Int) {
+        lanes.remove(laneId)
+        routeNames.remove(laneId)
+    }
+
+    /** 只取在跑的车道（供「哪条通道正在干活」判断用） */
+    fun lanesSnapshot(): List<LaneSnapshot> = lanes.values.toList()
+
+    fun bindRoute(laneId: Int, routeName: String) {
+        routeNames[laneId] = routeName
+    }
+
+    /** 通道被限流：记一笔惩罚，稍后自动衰减 */
+    fun penalize(routeName: String) {
+        penalties.getOrPut(routeName) { AtomicInteger(0) }.incrementAndGet()
+    }
+
+    /** 通道跑得顺：把惩罚往回减 */
+    fun reward(routeName: String) {
+        val counter = penalties[routeName] ?: return
+        if (counter.get() > 0) counter.decrementAndGet()
+    }
+
+    fun penaltyOf(routeName: String): Int = penalties[routeName]?.get() ?: 0
+
+    fun snapshot(routes: List<RouteStats>): DownloadDiagnostics = DownloadDiagnostics(
+        lanes = lanes.values.sortedBy { it.start },
+        targetLanes = target,
+        doneSlices = doneSlices.get(),
+        totalSlices = totalSlices.get(),
+        retries = retries.get(),
+        throttles = throttles.get(),
+        splits = splits.get(),
+        routes = routes,
+        activeUrl = activeUrl,
+    )
 }
 
 /**
@@ -87,6 +250,10 @@ private class RouteChannel(
  *     建议退避，而不是火上浇油地硬重试，否则会被越限越死。
  *  6. **渐进建连 + 实时吞吐反馈**：避免「一上来几百个请求把服务端打限流」和
  *     「某个通道早就慢下来了却还一直按旧速度分活」。
+ *  7. **强制 HTTP/1.1**：Cloudflare 这类 CDN 会协商 HTTP/2，把所有请求多路复用到
+ *     **同一条 TCP 连接**上 —— 长链路下单连接带宽就是天花板，开再多「车道」也没用。
+ *  8. **通道级并发配额**：某条通道命中 429/503 就临时降它的并发，
+ *     而不是继续往那根已经饱和的线路上加压。
  */
 class DownloadEngine {
 
@@ -96,22 +263,33 @@ class DownloadEngine {
     private val clients = mutableListOf<OkHttpClient>()
     private val allClients = ConcurrentLinkedDeque<OkHttpClient>()
 
-    /** 便于取消时立刻中断所有阻塞中的请求 */
+    /** 在飞的请求：取消时要一起掐掉，否则线程会卡在 socket read 上很久 */
+    private val inflight = CallRegistry()
+
+    /**
+     * 取消下载。
+     *
+     * 必须做到「点了就停」：置标志位 → 取消所有在飞 Call → 取消所有分发器。
+     * 只置标志位是不够的，阻塞中的 `execute()` 只认 `Call.cancel()`。
+     */
     fun cancel() {
         cancelled = true
         DownloadEngineFlag.cancelled = true
+        inflight.cancelAll()
         allClients.forEach { it.dispatcher.cancelAll() }
     }
 
     /**
      * 多通道并行下载。
      *
-     * @param routes 已按实测速度排序的通道，第一条同时作为其它通道失败时的兜底。
+     * @param routeUrls 每条通道 **各自** 要请求的地址（顺序与 [routes] 一一对应）。
+     *        之所以逐条传进来而不是统一套一个签名地址：ghfast 这类镜像只认
+     *        `github.com` 原始地址，套签名地址会被拒。
      * @param allowChunking 目标是否可能支持分段；为 false 时先走单连接，但在读到 206
      *        之后依旧会自动升级为分段下载（源码包也有 206 的时候）。
      */
     suspend fun download(
-        signedUrl: String,
+        routeUrls: List<Pair<com.artifactboost.app.data.DownloadRoute, String>>,
         routes: List<ScoredRoute>,
         fileName: String,
         connections: Int,
@@ -123,7 +301,9 @@ class DownloadEngine {
         DownloadEngineFlag.cancelled = false
         val startedAt = System.nanoTime()
         val plan = routes.ifEmpty { listOf(ScoredRoute(com.artifactboost.app.data.DownloadRoute.DIRECT, 1.0)) }
-        val urls = plan.map { it.route.apply(signedUrl) }
+        val urls = routeUrls.map { it.second }.ifEmpty {
+            listOf(com.artifactboost.app.data.DownloadRoute.DIRECT.apply(""))
+        }
 
         val tempDir = File(outputDir.parentFile ?: outputDir, "tmp-${System.currentTimeMillis()}")
         if (!tempDir.exists() && !tempDir.mkdirs()) throw DownloadException.BadResponse
@@ -184,13 +364,35 @@ class DownloadEngine {
         plan: List<ScoredRoute>,
         progress: (DownloadProgress) -> Unit,
     ): File {
-        val accumulator = ProgressAccumulator(total, progress)
+        // 车道状态看板：worker 实时登记，进度回调每拍取走一份快照。
+        // 注意它必须早于 RouteChannel 建好 —— 下面算通道配额时要读它的惩罚计数。
+        val board = LaneBoard(lanes)
+        // 通道列表在下面才建好，这里先用空引用占位，建好后立刻回填。
+        var channelsRef: List<RouteChannel> = emptyList()
+        val accumulator = ProgressAccumulator(total, progress) {
+            // 诊断快照走的是「现取」而不是「定时轮询」：只有真要推进度的那一拍才组数据，
+            // 零额外开销。routes() 里带上各通道实测速度与是否在跑。
+            val active = board.lanesSnapshot().map { it.routeName }.toSet()
+            board.snapshot(
+                channelsRef.map {
+                    RouteStats(
+                        name = it.name,
+                        speedBytesPerSecond = it.measuredSpeed,
+                        isActive = it.name in active,
+                    )
+                },
+            )
+        }
 
         // 关键：Cloudflare 这类 CDN 会协商 HTTP/2，所有请求被多路复用到同一条 TCP 连接上，
-        // 长链路下单连接带宽就是天花板，开再多「连接」也没用。
-        // 每个 OkHttpClient 有独立连接池，拆成多个客户端才能真正拿到多条并行连接。
+        // 长链路下单连接带宽就是天花板，开再多「车道」也没用。
+        // 因此这里显式只允许 HTTP/1.1，让每条车道各自占一条 TCP —— 真正并行。
+        // 同时拆成多个 OkHttpClient（各自独立连接池），进一步保证连接不复用。
         val sessionCount = minOf(4, maxOf(1, lanes / 8))
         val perSessionLimit = maxOf(1, lanes / sessionCount)
+        // 调度器的排队上限要比实际并发宽一些：某条连接卡住时，
+        // 后面的请求不至于被它的配额堵在门外。
+        val queueLimit = maxOf(perSessionLimit, (perSessionLimit * 3) / 2)
 
         val sessionClients = (0 until sessionCount).map {
             OkHttpClient.Builder()
@@ -198,10 +400,13 @@ class DownloadEngine {
                 .readTimeout(120, TimeUnit.SECONDS)
                 .callTimeout(0, TimeUnit.MILLISECONDS) // 不设总时长上限：大文件要慢慢下
                 .followRedirects(true)
-                .connectionPool(okhttp3.ConnectionPool(perSessionLimit, 5, TimeUnit.MINUTES))
+                // 只走 HTTP/1.1：避免 h2 把所有请求挤进一条 TCP
+                .protocols(listOf(okhttp3.Protocol.HTTP_1_1))
+                .retryOnConnectionFailure(true)
+                .connectionPool(okhttp3.ConnectionPool(maxOf(perSessionLimit, 8), 5, TimeUnit.MINUTES))
                 .dispatcher(okhttp3.Dispatcher().apply {
-                    maxRequests = perSessionLimit
-                    maxRequestsPerHost = perSessionLimit
+                    maxRequests = queueLimit
+                    maxRequestsPerHost = queueLimit
                 })
                 .build()
         }
@@ -218,8 +423,10 @@ class DownloadEngine {
                     client = sessionClients[index % sessionClients.size],
                     endpoints = endpoints,
                     speedHint = maxOf(scored.speed, 1.0),
+                    name = scored.route.name,
                 )
             }
+            channelsRef = channels
 
             val output = RandomAccessFile(outFile, "rw")
             output.setLength(total)
@@ -228,22 +435,82 @@ class DownloadEngine {
             val written = AtomicLong(0)
             val startedAt = System.nanoTime()
 
+            // 车道编号只增不减：worker 收工后编号不复用，
+            // 这样诊断面板上「车道 #7 干了什么」不会因为复用而张冠李戴。
+            val laneCounter = AtomicInteger(0)
+
+            // 每条通道分到的并发额度（单通道配额）：通道数少就给得多，
+            // 免得 4 条镜像时每条只剩 4 个并发、根本压不满带宽。
+            val perChannelQuota = maxOf(1, lanes / maxOf(channels.size, 1))
+
             try {
                 coroutineScope {
                     val jobs = mutableListOf<Job>()
                     var roundRobin = 0
 
+                    // 渐进建连：不再一上来就把 lanes 顶满。
+                    // 起步瞬间几百个请求同时砸过去，Azure/Cloudflare 会直接回 503 ServerBusy，
+                    // 一旦被限流就得指数退避，整段下载反而更慢。
+                    // 改成每 CONNECTION_RAMP_INTERVAL_MS 放一档，跑到目标并发后再全速调度。
+                    var allowedLanes = minOf(RAMP_STEP, lanes)
+                    var lastRampAt = System.nanoTime()
+
                     while (true) {
+                        // 取消后立刻退出调度循环，不再派新活儿
+                        if (cancelled || DownloadEngineFlag.cancelled) throw DownloadException.Cancelled
+
                         jobs.removeAll { it.isCompleted }
 
-                        // 1) 把并发顶到 lanes
+                        // 0) 建连爬坡：到点就放开一档并发
+                        val nowNanos = System.nanoTime()
+                        if (allowedLanes < lanes &&
+                            (nowNanos - lastRampAt) / 1_000_000 >= CONNECTION_RAMP_INTERVAL_MS
+                        ) {
+                            allowedLanes = minOf(allowedLanes + RAMP_STEP, lanes)
+                            lastRampAt = nowNanos
+                        }
+
+                        // 1) 把并发顶到「当前允许值」；通道被限流时按配额收缩
                         var assigned = false
-                        while (jobs.size < lanes) {
+                        while (jobs.size < allowedLanes) {
+                            // 此刻实际可用的并发额度：被限流的通道要临时降额，
+                            // 免得在同一根已经饱和的线路上继续加压、越限越死。
+                            val quota = channels.sumOf { channel ->
+                                if (channel.throttled || board.penaltyOf(channel.name) > 0) {
+                                    maxOf(1, perChannelQuota / 2)
+                                } else {
+                                    perChannelQuota
+                                }
+                            }
+                            if (jobs.size >= quota) break
+
                             val work = nextWork(pool, jobs.size, lanes, total) ?: break
-                            val channel = channels[pickChannel(channels, roundRobin)]
+                            val channelIndex = pickChannel(channels, roundRobin)
+                            val channel = channels[channelIndex]
                             roundRobin = (roundRobin + 1) % channels.size
+
+                            val laneId = laneCounter.getAndIncrement()
+                            board.totalSlices.incrementAndGet()
+                            board.bindRoute(laneId, channel.name)
+                            // 先登记一条 PENDING，让面板立刻能看到「这条车道已就位」
+                            board.update(
+                                LaneSnapshot(
+                                    laneId = laneId,
+                                    routeName = channel.name,
+                                    url = channel.endpoints.first(),
+                                    start = work.start,
+                                    end = work.end,
+                                    downloaded = 0,
+                                    speedBytesPerSecond = 0.0,
+                                    state = SegmentState.PENDING,
+                                    attempt = 1,
+                                    lastStatus = null,
+                                ),
+                            )
+
                             jobs += launch(Dispatchers.IO) {
                                 runSlice(
+                                    laneId = laneId,
                                     channel = channel,
                                     initial = work,
                                     pool = pool,
@@ -252,7 +519,10 @@ class DownloadEngine {
                                     output = output,
                                     written = written,
                                     accumulator = accumulator,
+                                    inflight = inflight,
+                                    board = board,
                                 )
+                                board.remove(laneId)
                             }
                             assigned = true
                         }
@@ -315,9 +585,18 @@ class DownloadEngine {
                 .header("User-Agent", GitHubClient.USER_AGENT)
                 .build()
 
-            val ranged = runCatching {
-                client.newCall(rangeProbe).execute().use { it.code == 206 }
-            }.getOrDefault(false)
+            val ranged = withContext(Dispatchers.IO) {
+                val call = client.newCall(rangeProbe)
+                inflight.register(call)
+                try {
+                    call.execute().use { it.code == 206 }
+                } finally {
+                    inflight.release(call)
+                }
+            }
+
+            currentCoroutineContext().ensureActive()
+            if (DownloadEngineFlag.cancelled) throw DownloadException.Cancelled
 
             if (ranged) {
                 val total = probeSize(listOf(url))?.total
@@ -347,52 +626,63 @@ class DownloadEngine {
                 .header("User-Agent", GitHubClient.USER_AGENT)
                 .build()
 
-            val written = client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) throw DownloadException.BadResponse
-                val body = response.body ?: throw DownloadException.BadResponse
-                val total = body.contentLength().takeIf { it > 0 } ?: 0L
+            val written = withContext(Dispatchers.IO) {
+                val call = client.newCall(request)
+                inflight.register(call)
+                try {
+                    call.execute().use { response ->
+                        if (!response.isSuccessful) throw DownloadException.BadResponse
+                        val body = response.body ?: throw DownloadException.BadResponse
+                        val total = body.contentLength().takeIf { it > 0 } ?: 0L
 
-                outFile.delete()
-                var done = 0L
-                val startedAt = System.nanoTime()
-                var lastEmit = 0L
+                        outFile.delete()
+                        var done = 0L
+                        val startedAt = System.nanoTime()
+                        var lastEmit = 0L
 
-                body.byteStream().use { input ->
-                    outFile.outputStream().buffered(BUFFER_SIZE).use { sink ->
-                        val buffer = ByteArray(BUFFER_SIZE)
-                        while (true) {
-                            if (cancelled) throw DownloadException.Cancelled
-                            val read = input.read(buffer)
-                            if (read <= 0) break
-                            sink.write(buffer, 0, read)
-                            done += read
+                        body.byteStream().use { input ->
+                            outFile.outputStream().buffered(BUFFER_SIZE).use { sink ->
+                                val buffer = ByteArray(BUFFER_SIZE)
+                                while (true) {
+                                    // 单连接路径同样要能秒停：标志位 + Call.cancel() 双保险
+                                    if (cancelled || DownloadEngineFlag.cancelled) {
+                                        throw DownloadException.Cancelled
+                                    }
+                                    val read = input.read(buffer)
+                                    if (read <= 0) break
+                                    sink.write(buffer, 0, read)
+                                    done += read
 
-                            val now = System.currentTimeMillis()
-                            if (now - lastEmit >= PROGRESS_INTERVAL_MS) {
-                                lastEmit = now
-                                val elapsed = maxOf((System.nanoTime() - startedAt) / 1_000_000_000.0, 0.05)
-                                progress(
-                                    DownloadProgress(
-                                        downloadedBytes = done,
-                                        totalBytes = total,
-                                        fraction = if (total > 0) (done.toFloat() / total) else 0f,
-                                        speedBytesPerSecond = done / elapsed,
-                                    ),
-                                )
+                                    val now = System.currentTimeMillis()
+                                    if (now - lastEmit >= PROGRESS_INTERVAL_MS) {
+                                        lastEmit = now
+                                        val elapsed = maxOf((System.nanoTime() - startedAt) / 1_000_000_000.0, 0.05)
+                                        progress(
+                                            DownloadProgress(
+                                                downloadedBytes = done,
+                                                totalBytes = total,
+                                                fraction = if (total > 0) (done.toFloat() / total) else 0f,
+                                                speedBytesPerSecond = done / elapsed,
+                                            ),
+                                        )
+                                    }
+                                }
                             }
                         }
-                    }
-                }
 
-                progress(
-                    DownloadProgress(
-                        downloadedBytes = done,
-                        totalBytes = maxOf(total, done),
-                        fraction = 1f,
-                        speedBytesPerSecond = 0.0,
-                    ),
-                )
-                done
+                        progress(
+                            DownloadProgress(
+                                downloadedBytes = done,
+                                totalBytes = maxOf(total, done),
+                                fraction = 1f,
+                                speedBytesPerSecond = 0.0,
+                            ),
+                        )
+                        done
+                    }
+                } finally {
+                    inflight.release(call)
+                }
             }
             return SingleOutcome(outFile, written, 1)
         } finally {
@@ -413,7 +703,7 @@ class DownloadEngine {
      * 探测文件大小：优先用 `Range: bytes=0-0`（返回 206 + Content-Range 才确认服务器支持分段），
      * 失败再退回 HEAD。逐条通道尝试，任何一条成功即可。
      */
-    private fun probeSize(urls: List<String>): Probe? {
+    private suspend fun probeSize(urls: List<String>): Probe? {
         var headFallback: Long? = null
         for (url in urls) {
             val probe = probeSize(url) ?: continue
@@ -423,7 +713,7 @@ class DownloadEngine {
         return headFallback?.let { Probe(it, false) }
     }
 
-    private fun probeSize(url: String): Probe? {
+    private suspend fun probeSize(url: String): Probe? {
         val client = probeClient
         synchronized(clients) { clients.add(client) }
         allClients.add(client)
@@ -434,37 +724,58 @@ class DownloadEngine {
                 .header("Range", "bytes=0-0")
                 .header("User-Agent", GitHubClient.USER_AGENT)
                 .build()
-            client.newCall(rangeRequest).execute().use { response ->
-                if (response.code == 206) {
-                    val contentRange = response.header("Content-Range")
-                    val total = contentRange?.substringAfterLast('/')?.trim()?.toLongOrNull()
-                    if (total != null && total > 0) return Probe(total, true)
-                }
-                // 返回 200 说明服务器忽略了 Range，不能分段
-                if (response.code == 200) {
-                    val length = response.header("Content-Length")?.toLongOrNull() ?: 0L
-                    return Probe(length, false)
+            val probed = withContext(Dispatchers.IO) {
+                val call = client.newCall(rangeRequest)
+                inflight.register(call)
+                try {
+                    call.execute().use { response ->
+                        if (response.code == 206) {
+                            val contentRange = response.header("Content-Range")
+                            val total = contentRange?.substringAfterLast('/')?.trim()?.toLongOrNull()
+                            if (total != null && total > 0) return@use Probe(total, true)
+                        }
+                        // 返回 200 说明服务器忽略了 Range，不能分段
+                        if (response.code == 200) {
+                            val length = response.header("Content-Length")?.toLongOrNull() ?: 0L
+                            return@use Probe(length, false)
+                        }
+                        null
+                    }
+                } finally {
+                    inflight.release(call)
                 }
             }
+            if (probed != null) return probed
 
             val headRequest = Request.Builder()
                 .url(url)
                 .head()
                 .header("User-Agent", GitHubClient.USER_AGENT)
                 .build()
-            client.newCall(headRequest).execute().use { response ->
-                if (response.isSuccessful) {
-                    val length = response.header("Content-Length")?.toLongOrNull()
-                    if (length != null && length > 0) return Probe(length, false)
+            return withContext(Dispatchers.IO) {
+                val call = client.newCall(headRequest)
+                inflight.register(call)
+                try {
+                    call.execute().use { response ->
+                        if (response.isSuccessful) {
+                            val length = response.header("Content-Length")?.toLongOrNull()
+                            if (length != null && length > 0) Probe(length, false) else null
+                        } else {
+                            null
+                        }
+                    }
+                } finally {
+                    inflight.release(call)
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {
             return null
         } finally {
             synchronized(clients) { clients.remove(client) }
             allClients.remove(client)
         }
-        return null
     }
 
     private fun isCancellation(error: Throwable): Boolean =
@@ -479,6 +790,12 @@ class DownloadEngine {
 
         /** 单连接模式判断「能否升级为分段」时试探的字节数 */
         const val SINGLE_PROBE_BYTES = 64 * 1024
+
+        /** 渐进建连：每档放开多少条并发 */
+        const val RAMP_STEP = 8
+
+        /** 渐进建连：每隔多少毫秒放开一档 */
+        const val CONNECTION_RAMP_INTERVAL_MS = 250L
 
         /** 小于这个体积不做分段：切来切去不如一条连接拉完 */
         const val MIN_CHUNKED_TOTAL = 4L * 1024 * 1024
@@ -562,6 +879,7 @@ private fun delayFor(pool: SlicePool, live: Int, lanes: Int, startedAt: Long): L
  * 这样任何一个连接都不会长时间独占一大块，空闲连接永远有活儿可干。
  */
 private suspend fun runSlice(
+    laneId: Int,
     channel: RouteChannel,
     initial: Chunk,
     pool: SlicePool,
@@ -570,10 +888,16 @@ private suspend fun runSlice(
     output: RandomAccessFile,
     written: AtomicLong,
     accumulator: ProgressAccumulator,
+    inflight: CallRegistry,
+    board: LaneBoard,
 ) {
     var current = initial
 
     while (true) {
+        // 被取消就立刻收工，不再取新数据
+        currentCoroutineContext().ensureActive()
+        if (DownloadEngineFlag.cancelled) return
+
         val remaining = (total - written.get()).coerceAtLeast(0)
         val want = sliceTarget(lanes, total, remaining).coerceAtMost(current.length.toInt())
         val from = current.start
@@ -582,15 +906,86 @@ private suspend fun runSlice(
         if (want < current.length) {
             // 手里这段太长：只取前一小片，剩下的还回去让别的连接分
             pool.putBack(Chunk(0, to + 1, current.end))
+            board.splits.incrementAndGet()
         }
 
-        val outcome = fetchSlice(channel, Chunk(0, from, to), pool)
+        // 派活前先更新看板：面板能立刻看到这条车道换到了哪一段
+        board.update(
+            LaneSnapshot(
+                laneId = laneId,
+                routeName = channel.name,
+                url = channel.endpoints.first(),
+                start = from,
+                end = to,
+                downloaded = 0,
+                speedBytesPerSecond = channel.measuredSpeed,
+                state = SegmentState.DOWNLOADING,
+                attempt = 1,
+                lastStatus = 206,
+            ),
+        )
+        board.activeUrl = channel.endpoints.first()
+
+        val sliceStartedAt = System.nanoTime()
+        val outcome = try {
+            fetchSlice(
+                chunk = Chunk(0, from, to),
+                pool = pool,
+                inflight = inflight,
+                board = board,
+                laneId = laneId,
+                channel = channel,
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: DownloadException.Cancelled) {
+            board.remove(laneId)
+            return
+        } catch (e: Exception) {
+            // 这一片彻底失败（重试耗尽）：在面板上标红，然后交给上层判断
+            board.update(
+                LaneSnapshot(
+                    laneId = laneId,
+                    routeName = channel.name,
+                    url = channel.endpoints.first(),
+                    start = from,
+                    end = to,
+                    downloaded = 0,
+                    speedBytesPerSecond = 0.0,
+                    state = SegmentState.FAILED,
+                    attempt = DownloadEngine.MAX_ATTEMPTS,
+                    lastStatus = (e as? DownloadException.Throttled)?.code,
+                ),
+            )
+            // 失败的那一段必须还回池子，否则文件会缺一块
+            if (current.length > 0) pool.putBack(Chunk(0, from, current.end))
+            throw e
+        }
+
         if (outcome.received > 0) {
             writeAt(output, from, outcome.data, outcome.received)
             written.addAndGet(outcome.received.toLong())
             pool.recordDone(outcome.received.toLong())
             accumulator.advance(outcome.received.toLong())
             channel.observe(outcome.elapsedNanos, outcome.received.toLong())
+            board.doneSlices.incrementAndGet()
+            board.reward(channel.name)
+
+            val seconds = maxOf(outcome.elapsedNanos / 1_000_000_000.0, 0.001)
+            board.update(
+                LaneSnapshot(
+                    laneId = laneId,
+                    routeName = channel.name,
+                    url = channel.endpoints.first(),
+                    start = from,
+                    end = to,
+                    downloaded = outcome.received.toLong(),
+                    speedBytesPerSecond = outcome.received / seconds,
+                    state = SegmentState.DONE,
+                    attempt = 1,
+                    lastStatus = 206,
+                ),
+            )
         }
         if (outcome.received < want) {
             // 没取满（连接中途断了）：把缺的那一段还回池子重取，绝不丢数据
@@ -620,12 +1015,25 @@ private data class SliceOutcome(
  * 失败时按指数退避重试；命中 429/503 时读 `Retry-After` 退避 ——
  * Azure 单 Blob 有「约 60 MiB/s 或 500 请求/秒」的目标，超了就是 503 ServerBusy，
  * 官方建议用指数退避而不是硬顶，否则会被越限越死。
+ *
+ * 取消语义：请求登记到 [CallRegistry]，`cancel()` 会把它掐掉；
+ * 阻塞读取放在 [withContext] 里，配合 `ensureActive()` 做到「点了就停」。
+ * 退避也换成 `delay()`，这样取消能立刻打断等待，而不是睡满再检查。
  */
-private fun fetchSlice(channel: RouteChannel, chunk: Chunk, pool: SlicePool): SliceOutcome {
+private suspend fun fetchSlice(
+    chunk: Chunk,
+    pool: SlicePool,
+    inflight: CallRegistry,
+    board: LaneBoard,
+    laneId: Int,
+    channel: RouteChannel,
+): SliceOutcome {
     var lastError: Exception = DownloadException.BadResponse
     var attempt = 0
 
     while (attempt < DownloadEngine.MAX_ATTEMPTS) {
+        // 每轮重试前先看有没有被取消
+        currentCoroutineContext().ensureActive()
         if (DownloadEngineFlag.cancelled) throw DownloadException.Cancelled
 
         val url = channel.endpoints.first()
@@ -635,39 +1043,59 @@ private fun fetchSlice(channel: RouteChannel, chunk: Chunk, pool: SlicePool): Sl
             .header("User-Agent", GitHubClient.USER_AGENT)
             .build()
 
-        val buffer = ByteArray(chunk.length.toInt())
         val startedAt = System.nanoTime()
         try {
-            channel.client.newCall(request).execute().use { response ->
-                when (response.code) {
-                    206, 200 -> Unit
-                    429, 503 -> {
-                        pool.throttles.incrementAndGet()
-                        throw DownloadException.Throttled(response.code, DownloadEngine.retryAfter(response.headers))
+            // 阻塞 IO 放到 IO 线程池；Call 登记后 cancel() 能立刻打断它
+            val data = withContext(Dispatchers.IO) {
+                val call = channel.client.newCall(request)
+                inflight.register(call)
+                try {
+                    call.execute().use { response ->
+                        when (response.code) {
+                            206, 200 -> Unit
+                            429, 503 -> {
+                                pool.throttles.incrementAndGet()
+                                board.throttles.incrementAndGet()
+                                // 通道级降额：不是简单降权重，而是直接把它判为「被限流」，
+                                // 调度器下一轮就会削它的并发，避免越限越死。
+                                channel.throttled = true
+                                board.penalize(channel.name)
+                                throw DownloadException.Throttled(
+                                    response.code,
+                                    DownloadEngine.retryAfter(response.headers),
+                                )
+                            }
+                            else -> throw DownloadException.BadResponse
+                        }
+                        channel.throttled = false
+                        val body = response.body ?: throw DownloadException.BadResponse
+                        val buffer = ByteArray(chunk.length.toInt())
+                        var received = 0
+                        body.byteStream().use { input ->
+                            while (received < buffer.size) {
+                                val read = input.read(buffer, received, buffer.size - received)
+                                if (read <= 0) break
+                                received += read
+                            }
+                        }
+                        if (received <= 0) throw DownloadException.Incomplete
+                        buffer to received
                     }
-                    else -> throw DownloadException.BadResponse
+                } finally {
+                    inflight.release(call)
                 }
-                val body = response.body ?: throw DownloadException.BadResponse
-
-                var received = 0
-                body.byteStream().use { input ->
-                    while (received < buffer.size) {
-                        val read = input.read(buffer, received, buffer.size - received)
-                        if (read <= 0) break
-                        received += read
-                    }
-                }
-                if (received <= 0) throw DownloadException.Incomplete
-                return SliceOutcome(buffer, received, System.nanoTime() - startedAt)
             }
+            return SliceOutcome(data.first, data.second, System.nanoTime() - startedAt)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            // 取消导致的中断：统一翻译成 Cancelled，不要被当成网络错误去重试
             if (e is DownloadException.Cancelled || DownloadEngineFlag.cancelled) {
                 throw DownloadException.Cancelled
             }
             lastError = e
             attempt++
+            board.retries.incrementAndGet()
             if (attempt >= DownloadEngine.MAX_ATTEMPTS) break
 
             if (e is DownloadException.Throttled) {
@@ -678,7 +1106,25 @@ private fun fetchSlice(channel: RouteChannel, chunk: Chunk, pool: SlicePool): Sl
                 // 通道彻底不通了就轮到备用地址
                 channel.endpoints = channel.endpoints.drop(1) + channel.endpoints.first()
             }
-            Thread.sleep(DownloadEngine.backoffMillis(attempt, e))
+
+            // 重试状态同步到面板：用户能看到「车道 #3 正在第 2 次重试 / 上一次 503」
+            board.update(
+                LaneSnapshot(
+                    laneId = laneId,
+                    routeName = channel.name,
+                    url = channel.endpoints.first(),
+                    start = chunk.start,
+                    end = chunk.end,
+                    downloaded = 0,
+                    speedBytesPerSecond = 0.0,
+                    state = SegmentState.RETRYING,
+                    attempt = attempt + 1,
+                    lastStatus = (e as? DownloadException.Throttled)?.code,
+                ),
+            )
+
+            // 退避用 delay 而不是 Thread.sleep：取消能立刻打断等待
+            delay(DownloadEngine.backoffMillis(attempt, e))
         }
     }
 
@@ -793,6 +1239,8 @@ internal class SlicePool(val total: Long) {
 class ProgressAccumulator(
     private val total: Long,
     private val handler: (DownloadProgress) -> Unit,
+    /** 快照来源：每拍现取一次车道看板，拿到的就是「此刻」而不是「启动时」的明细 */
+    private val diagnostics: (() -> DownloadDiagnostics?)? = null,
 ) {
     @Volatile private var downloaded = 0L
     @Volatile private var lastEmit = 0L
@@ -848,6 +1296,7 @@ class ProgressAccumulator(
             totalBytes = total,
             fraction = if (total > 0) minOf(current.toFloat() / total, 1f) else 0f,
             speedBytesPerSecond = maxOf(smoothedSpeed, 0.0),
+            diagnostics = diagnostics?.invoke(),
         )
     }
 }

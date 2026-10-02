@@ -95,7 +95,7 @@ fun LoginScreen() {
             IconBadge(Icons.Filled.Bolt, colors.blue, 64.dp)
             Text("ArtifactBoost", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = colors.strongText)
             Text(
-                "GitHub 产物 · 正式版 · 源码 · 构建日志\n多通道并发加速下载",
+                "GitHub 产物 · 发行版 · 源码 · 构建日志\n多通道并发加速下载",
                 fontSize = 13.sp,
                 textAlign = TextAlign.Center,
                 color = colors.muted,
