@@ -22,8 +22,15 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # ubuntu-latest 镜像自带 Android SDK 与 build-tools，
+      # 不再依赖 android-actions/setup-android（该 action 经常因为
+      # 拉取 repository manifest 超时而直接失败）。这里只声明需要的版本。
+      - name: Locate Android SDK
+        run: |
+          echo "ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=${ANDROID_HOME:-/usr/local/lib/android/sdk}" >> "$GITHUB_ENV"
+          ls "${ANDROID_HOME:-/usr/local/lib/android/sdk}/platforms" || true
+          ls "${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools" || true
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -39,7 +46,6 @@ jobs:
 
       - name: Lint
         run: ./gradlew lintDebug --stacktrace
-        continue-on-error: true
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
