@@ -83,9 +83,102 @@ sealed interface MDInline {
 }
 
 object MarkdownParser {
+
+    /**
+     * README 里大量存在的**内嵌 HTML**（GitHub 允许 Markdown 里直接写 HTML）：
+     * `<div align="center">`、`<h1>`、`<img>` badge、`<a>`、`<sub>`……
+     * 我们的解析器只认 Markdown，HTML 标签会被当成纯文本吐出来，
+     * 界面上就是一屏源码。
+     *
+     * 这里在解析前做一遍归一化：常见标签转成等效 Markdown（走既有渲染管线），
+     * 不认识的标签剥壳保内容，HTML 实体解码（badge URL 里的 `&amp;` 全靠它）。
+     * ``` 围栏代码块里的内容原样保留 —— 那是用户想展示的代码。
+     */
+    internal fun normalizeHtml(source: String): String {
+        // 按 ``` 围栏切开，围栏内的段落原样保留。
+        // 用 findAll 手动枚举，不能用 split+捕获组 —— Kotlin 的 Regex.split 不保留捕获组，
+        // 围栏会被当成分隔符直接丢掉（围栏内容凭空消失）。
+        val fence = Regex("```[\\s\\S]*?```|```[\\s\\S]*")
+        val out = StringBuilder()
+        var last = 0
+        for (m in fence.findAll(source)) {
+            val start = m.range.first
+            if (start > last) out.append(transformHtml(source.substring(last, start)))
+            out.append(m.value)   // 围栏内原样保留
+            last = m.range.last + 1
+        }
+        if (last < source.length) out.append(transformHtml(source.substring(last)))
+        return out.toString()
+    }
+
+    private fun transformHtml(text: String): String {
+        var s = text
+
+        // HTML 注释
+        s = Regex("<!--[\\s\\S]*?-->").replace(s, "")
+
+        // <img src="X" alt="Y" ...> → ![Y](X)（属性任意顺序；width/height 忽略）
+        s = Regex("<img\\s[^>]*>", RegexOption.IGNORE_CASE).replace(s) { m ->
+            val src = htmlAttr(m.value, "src")
+            if (src.isNullOrEmpty()) ""
+            else "![${htmlAttr(m.value, "alt") ?: ""}]($src)"
+        }
+
+        // <a href="X">内容</a> → [内容](X)（内容可能已含上面转换出的图片 → badge）
+        s = Regex("<a\\s[^>]*href\\s*=\\s*[\"']([^\"']*)[\"'][^>]*>([\\s\\S]*?)</a>", RegexOption.IGNORE_CASE)
+            .replace(s) { m -> "[${m.groupValues[2].trim()}](${m.groupValues[1]})" }
+
+        // <h1>~<h6> → 标题；内容里有图片就降级成段落（标题渲染不了图）
+        s = Regex("<h([1-6])(\\s[^>]*)?>([\\s\\S]*?)</h\\1>", RegexOption.IGNORE_CASE).replace(s) { m ->
+            val level = m.groupValues[1].toInt()
+            val inner = m.groupValues[3].trim()
+            if (inner.isEmpty()) ""
+            else if (inner.contains("](")) "\n$inner\n"
+            else "\n${"#".repeat(level)} $inner\n"
+        }
+
+        // <b>/<strong>/<i>/<em> → Markdown 强调
+        s = Regex("</?(?:b|strong)>", RegexOption.IGNORE_CASE).replace(s, "**")
+        s = Regex("</?(?:i|em)>", RegexOption.IGNORE_CASE).replace(s, "*")
+
+        // <br> / <hr>
+        s = Regex("<br\\s*/?>", RegexOption.IGNORE_CASE).replace(s, "\n")
+        s = Regex("<hr\\s*/?>", RegexOption.IGNORE_CASE).replace(s, "\n---\n")
+
+        // <li> → 列表行（必须在通用剥壳之前）
+        s = Regex("<li(\\s[^>]*)?>", RegexOption.IGNORE_CASE).replace(s, "\n- ")
+
+        // 已知的纯排版标签：剥壳保内容（div/p/span/sub/sup/center/details…）
+        s = Regex(
+            "</?(?:div|p|span|sub|sup|center|details|summary|kbd|samp|small|big|font|picture|source|figure|figcaption|picture|ins|del|u|s|strike)(\\s[^>]*)?/?>",
+            RegexOption.IGNORE_CASE,
+        ).replace(s, "")
+
+        // 兜底：其余任何未知标签也剥掉 —— 绝不让源码出现在界面上。
+        // 注意这在解码 HTML 实体**之前**：正文里的 `&lt;div&gt;` 此时还不是真标签，不受影响。
+        s = Regex("</?[a-zA-Z][a-zA-Z0-9-]*(\\s[^<>]*)?/?>").replace(s, "")
+
+        // HTML 实体解码（&amp; 常见于 shields badge URL 的参数里，不解会 404）
+        s = s.replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&apos;", "'")
+            .replace("&nbsp;", " ")
+
+        return s
+    }
+
+    /** 从 HTML 标签里取属性值（任意属性顺序，单双引号都认；要求属性名前有空白，避免误命中 data-src 之类） */
+    private fun htmlAttr(tag: String, name: String): String? {
+        val m = Regex("(?:^|\\s)$name\\s*=\\s*[\"']([^\"']*)[\"']", RegexOption.IGNORE_CASE).find(tag) ?: return null
+        return m.groupValues[1]
+    }
+
     fun parse(source: String): List<MDBlock> {
         val blocks = mutableListOf<MDBlock>()
-        val lines = source.replace("\r\n", "\n").split("\n")
+        val lines = normalizeHtml(source).replace("\r\n", "\n").split("\n")
         var index = 0
 
         while (index < lines.size) {
