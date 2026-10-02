@@ -73,6 +73,14 @@ data class AccelerationSettings(
     val clampedConnections: Int get() = connections.coerceIn(1, 64)
 
     /**
+     * 下载开始时**直接沿用**测速结果的有效期。
+     *
+     * 老实现是 24 小时：一条早上测出来的「快通道」到了晚上可能早就被限流，
+     * 结果下载起步看着还行、很快掉到几十 KB。现在超过这个时长就重新测速。
+     */
+    val savedPlanValidMillis: Long get() = 4 * 3600 * 1000L
+
+    /**
      * 当前设置下的候选通道（直连永远保留兜底）。
      * 私有仓库一律只走直连，避免产物数据经过第三方。
      */
@@ -90,11 +98,17 @@ data class AccelerationSettings(
             else listOf(DownloadRoute.DIRECT) + DownloadRoute.BUILT_IN_MIRRORS
     }
 
-    /** 可以直接沿用的测速结果（24 小时内有效、且不在私有仓库里用镜像） */
-    fun savedPlan(isPrivateRepo: Boolean, nowMillis: Long = System.currentTimeMillis()): List<ScoredRoute>? {
+    /**
+     * 可以直接沿用的测速结果：
+     * 只在 [savedPlanValidMillis] 内有效，且私有仓库绝不套用镜像。
+     */
+    fun savedPlan(
+        isPrivateRepo: Boolean,
+        nowMillis: Long = System.currentTimeMillis(),
+    ): List<ScoredRoute>? {
         val route = testedRoute ?: return null
         val testedAt = testedAtMillis ?: return null
-        if (nowMillis - testedAt >= 24 * 3600 * 1000L) return null
+        if (nowMillis - testedAt >= savedPlanValidMillis) return null
         if (isPrivateRepo && !route.isDirect) return null
         if (route !in candidateRoutes(isPrivateRepo)) return null
         return listOf(ScoredRoute(route, maxOf(testedSpeed, 0.01)))
@@ -169,11 +183,14 @@ data class AccelerationSettings(
 
 /**
  * 通道测速：每个通道各拉一小段数据，取最快的那些。
- * 采样 256KB——快通道 0.1~0.5s 出结果，慢通道也不会拖太久。
+ *
+ * 采样 512KB 并且**从文件中部取样**（而不是 0 字节处）——
+ * 长链路上头几个包要经历 TCP 慢启动，只测开头会把所有通道都测成同一个烂数，
+ * 于是选出来的「最快通道」其实是抽签结果。多测一点、测中间一点，排名才可信。
  */
 object RouteProbe {
-    const val SAMPLE_BYTES: Long = 256 * 1024
-    private const val TIMEOUT_MS = 6_000L
+    const val SAMPLE_BYTES: Long = 512 * 1024
+    private const val TIMEOUT_MS = 8_000L
 
     /**
      * 探测专用客户端：限制总时长，
@@ -194,21 +211,30 @@ object RouteProbe {
     suspend fun measureAll(
         routes: List<DownloadRoute>,
         signedUrl: String,
+        /** 已知体积时从中间取样；未知就从头开始 */
+        knownSize: Long? = null,
         onResult: (ScoredRoute) -> Unit = {},
     ): List<ScoredRoute> = coroutineScope {
         val results = routes.map { route ->
             async(Dispatchers.IO) {
-                measure(route, signedUrl)?.also(onResult)
+                measure(route, signedUrl, knownSize = knownSize)?.also(onResult)
             }
         }.mapNotNull { it.await() }
         results.sortedByDescending { it.speed }
     }
 
     /** 单通道测速，失败返回 null */
-    fun measure(route: DownloadRoute, signedUrl: String, limit: Long = SAMPLE_BYTES): ScoredRoute? {
+    fun measure(
+        route: DownloadRoute,
+        signedUrl: String,
+        limit: Long = SAMPLE_BYTES,
+        knownSize: Long? = null,
+    ): ScoredRoute? {
+        // 已知体积就从中间取样，避开慢启动
+        val offset = knownSize?.let { if (it > limit * 3) (it - limit) / 2 else 0L } ?: 0L
         val request = okhttp3.Request.Builder()
             .url(route.apply(signedUrl))
-            .header("Range", "bytes=0-${limit - 1}")
+            .header("Range", "bytes=$offset-${offset + limit - 1}")
             .header("User-Agent", GitHubClient.USER_AGENT)
             .build()
 

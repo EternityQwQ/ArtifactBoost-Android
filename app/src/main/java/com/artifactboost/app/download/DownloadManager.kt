@@ -26,6 +26,8 @@ data class SpeedTestTarget(
     val url: String,
     val label: String,
     val isPrivate: Boolean,
+    /** 已知体积：测速时从文件中部取样，避开 TCP 慢启动 */
+    val size: Long? = null,
 )
 
 /** 单个下载任务的状态 */
@@ -177,7 +179,7 @@ class DownloadManager(
                     val url = client.resolveDownloadUrl(
                         DownloadSource.Artifact(repo.fullName, candidate.id),
                     )
-                    return SpeedTestTarget(url, "${repo.name} · ${candidate.name}", repo.isPrivate)
+                    return SpeedTestTarget(url, "${repo.name} · ${candidate.name}", repo.isPrivate, candidate.sizeInBytes)
                 } catch (_: Exception) {
                     // 换日志再试
                 }
@@ -245,7 +247,7 @@ class DownloadManager(
                 }
             } else {
                 setRouteSummary(item.id, "正在测速选通道…")
-                val measured = RouteProbe.measureAll(candidates, signedUrl)
+                val measured = RouteProbe.measureAll(candidates, signedUrl, knownSize = item.size)
                 val fastest = measured.firstOrNull()?.speed ?: 0.0
                 val viable = measured.filter { it.speed >= fastest * 0.4 }
                 if (viable.isEmpty()) {
@@ -265,6 +267,9 @@ class DownloadManager(
 
         val connections = settings.clampedConnections
         val outputDir = outputDir
+        // 源码包由 GitHub 现场打包，通常不支持 Range；但引擎会自己探测，
+        // 真拿到 206 就自动升级成多线程，所以这里只是「别抱太大期望」的提示
+        val mayChunk = item.source.supportsChunkedDownload
 
         return try {
             val result = engine.download(
@@ -273,6 +278,7 @@ class DownloadManager(
                 fileName = item.fileName,
                 connections = connections,
                 outputDir = outputDir,
+                allowChunking = mayChunk,
             ) { progress ->
                 _states.value = _states.value + (item.id to DownloadState.Downloading(progress))
             }
@@ -287,6 +293,7 @@ class DownloadManager(
                 fileName = item.fileName,
                 connections = connections,
                 outputDir = outputDir,
+                allowChunking = mayChunk,
             ) { progress ->
                 _states.value = _states.value + (item.id to DownloadState.Downloading(progress))
             }

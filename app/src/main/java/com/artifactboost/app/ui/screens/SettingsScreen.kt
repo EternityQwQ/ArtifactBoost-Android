@@ -126,7 +126,7 @@ fun SettingsScreen() {
             var candidates = settings.candidateRoutes(target.isPrivate)
             if (target.isPrivate) candidates = listOf(DownloadRoute.DIRECT)
 
-            val measured = RouteProbe.measureAll(candidates, target.url)
+            val measured = RouteProbe.measureAll(candidates, target.url, knownSize = target.size)
             testResults = measured
 
             val best = measured.firstOrNull()
