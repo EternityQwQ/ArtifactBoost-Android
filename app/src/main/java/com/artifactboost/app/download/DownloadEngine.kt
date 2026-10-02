@@ -490,7 +490,6 @@ class DownloadEngine {
                             roundRobin = (roundRobin + 1) % channels.size
 
                             val laneId = laneCounter.getAndIncrement()
-                            board.totalSlices.incrementAndGet()
                             board.bindRoute(laneId, channel.name)
                             // 先登记一条 PENDING，让面板立刻能看到「这条车道已就位」
                             board.update(
@@ -791,11 +790,18 @@ class DownloadEngine {
         /** 单连接模式判断「能否升级为分段」时试探的字节数 */
         const val SINGLE_PROBE_BYTES = 64 * 1024
 
-        /** 渐进建连：每档放开多少条并发 */
-        const val RAMP_STEP = 8
+        /**
+         * 渐进建连：每档放开多少条并发。
+         *
+         * 爬坡的目的是避开「起步瞬间几百个请求同时砸过去 → 503 ServerBusy」，
+         * 但步子太小会白白浪费前几秒带宽。16 是个平衡点：
+         * 单通道下 4 档（约 0.45s）就能顶到 64 并发，既不会一开始就被限流，
+         * 也不至于让用户觉得「怎么慢慢悠悠的」。
+         */
+        const val RAMP_STEP = 16
 
-        /** 渐进建连：每隔多少毫秒放开一档 */
-        const val CONNECTION_RAMP_INTERVAL_MS = 250L
+        /** 渐进建连：每隔多少毫秒放开一档（配合 RAMP_STEP 决定爬坡总时长） */
+        const val CONNECTION_RAMP_INTERVAL_MS = 150L
 
         /** 小于这个体积不做分段：切来切去不如一条连接拉完 */
         const val MIN_CHUNKED_TOTAL = 4L * 1024 * 1024
@@ -835,7 +841,15 @@ class DownloadEngine {
 // MARK: - 调度原语（引擎之外，便于独立推理）
 
 /** 一次分片请求的目标字节数下限 */
-internal const val MIN_SLICE_TARGET = 128 * 1024
+/**
+ * 一次分片请求的目标字节数下限。
+ *
+ * 调到 64KB 是为了收尾阶段：剩余量少时，如果每片还按 128KB 取，
+ * 最后那几 MB 只能被一两条连接瓜分，速度会「断崖式」掉下去。
+ * 64KB 让尾段能摊给更多连接，末段也能贴着带宽跑完。
+ * 再小就得不偿失 —— 请求头开销开始占比明显。
+ */
+internal const val MIN_SLICE_TARGET = 64 * 1024
 
 /** 一次分片请求的目标字节数上限：太大就退化成「一条连接啃大块」了 */
 internal const val MAX_SLICE_TARGET = 4 * 1024 * 1024
@@ -843,12 +857,16 @@ internal const val MAX_SLICE_TARGET = 4 * 1024 * 1024
 /**
  * 分配下一段活儿：优先拿现成的；拿不到而连接还闲着，就从末尾切一刀。
  * 这一步是「分片续做」的入口，也是收尾阶段还能保持满速的原因。
+ *
+ * [live] 是「当前还有多少条连接在跑」。注意它**不能传 0**：
+ * `splitTail` 里 `if (live <= 0) return null`，传 0 就等于禁止切分，
+ * 收尾阶段池子一空就再也派不出活儿。调用方至少应传 1（代表自己这条在跑）。
  */
 internal fun nextWork(pool: SlicePool, live: Int, lanes: Int, total: Long): Chunk? {
     pool.take()?.let { return it }
     if (live >= lanes) return null
     val remaining = (total - pool.downloaded()).coerceAtLeast(0)
-    return pool.splitTail(live, sliceTarget(lanes, total, remaining))
+    return pool.splitTail(maxOf(live, 1), sliceTarget(lanes, total, remaining))
 }
 
 /**
@@ -864,19 +882,32 @@ internal fun sliceTarget(lanes: Int, total: Long, remaining: Long): Int {
 private fun delayFor(pool: SlicePool, live: Int, lanes: Int, startedAt: Long): Long {
     val warmingUp = (System.nanoTime() - startedAt) / 1_000_000 < 2_000
     return when {
-        warmingUp -> 40L
-        pool.backlog > 0 -> 30L
-        live >= lanes -> 80L
-        live > 1 -> 150L
-        else -> 250L
+        warmingUp -> 30L
+        pool.backlog > 0 -> 20L
+        live >= lanes -> 60L
+        live > 1 -> 80L
+        // 只剩自己一条时也别睡太久：这个分支每多睡一次，
+        // 就是在「明明还能切分尾部、却白白空等」的时间上加一笔
+        else -> 120L
     }
 }
 
 /**
- * 一个 worker 的生命周期：攥着一段区间，一小片一小片地取数据。
+ * 一个 worker 的生命周期：一次只攥着**一小片**区间，干完立刻回池子重新要活儿。
  *
- * 每片只取 [sliceTarget] 那么多字节，剩下的立刻还回池子 ——
- * 这样任何一个连接都不会长时间独占一大块，空闲连接永远有活儿可干。
+ * ## 区间所有权铁律
+ *
+ * 一段字节区间在任意时刻**只能有一个持有者**：要么在池子的队列里，
+ * 要么在某个 worker 手里 —— **绝不能两边都有**。
+ *
+ * 老实现是这样写的：手里有一大段时，先把「剩下没取的部分」`putBack` 回池子，
+ * 然后把这个 worker 的 `current` 继续指向原来那一大段。于是这段字节
+ * **同时存在于池子和 worker 手上**。池子随时可能把它派给另一个 worker，
+ * 两个 worker 就会下到同一段、往文件同一偏移重复写盘，
+ * 派发总字节会超过文件体积（实测 200MB 的文件多派了 127KB）。
+ *
+ * 现在改成：切出一小片之后，worker 只持有这一小片，`current` 立刻收窄；
+ * 干完就回池子重新取，不再自己攥着剩余部分。
  */
 private suspend fun runSlice(
     laneId: Int,
@@ -899,15 +930,23 @@ private suspend fun runSlice(
         if (DownloadEngineFlag.cancelled) return
 
         val remaining = (total - written.get()).coerceAtLeast(0)
-        val want = sliceTarget(lanes, total, remaining).coerceAtMost(current.length.toInt())
+
+        // 只取这一小片。取满整段时 current.length 本身就不足 target，coerceIn 保证不越界。
+        val want = sliceTarget(lanes, total, remaining).coerceIn(1, current.length.toInt())
         val from = current.start
         val to = from + want - 1
 
-        if (want < current.length) {
-            // 手里这段太长：只取前一小片，剩下的还回去让别的连接分
+        if (to < current.end) {
+            // 手里这段比一小片长：把「剩下的」还回池子。
+            // 还回去之后，worker 必须立刻放弃对它的所有权 —— 也就是
+            // 把 current 收窄成刚切出来的这一小片，绝不再引用后半段。
             pool.putBack(Chunk(0, to + 1, current.end))
             board.splits.incrementAndGet()
         }
+        current = Chunk(0, from, to)
+
+        // 每真正派发一片就记一笔，让「完成 / 累计」两个数对得上
+        board.totalSlices.incrementAndGet()
 
         // 派活前先更新看板：面板能立刻看到这条车道换到了哪一段
         board.update(
@@ -993,13 +1032,13 @@ private suspend fun runSlice(
             if (missing.length > 0) pool.putBack(missing)
         }
 
-        if (to >= current.end) {
-            // 手里这段干完了，再要一段；要不到就收工
-            current = nextWork(pool, 0, lanes, total) ?: return
-        } else {
-            // 手里还剩一截，接着啃
-            current = Chunk(0, to + 1, current.end)
-        }
+        // 这一小片已经干完，回池子重新要活儿。
+        //
+        // 注意这里传的 live = 1：代表「我自己还占着一条连接」。
+        // 老实现传的是 0，而 splitTail 里 `if (live <= 0) return null`，
+        // 于是 worker 自己续做时**永远切不动尾部区间** —— 收尾阶段
+        // 池子一空，所有 worker 就只能干等，退化成单连接爬完最后一段。
+        current = nextWork(pool, 1, lanes, total) ?: return
     }
 }
 
@@ -1202,11 +1241,47 @@ internal class SlicePool(val total: Long) {
     }
 
     /** 取一段活儿；没有就返回 null，由调度循环决定要不要切分 */
-    fun take(): Chunk? = queue.pollFirst()
+    fun take(): Chunk? {
+        val chunk = queue.pollFirst()
+        checkInvariants()
+        return chunk
+    }
 
     /** 把没下完的区间还回队列最前面 */
     fun putBack(chunk: Chunk) {
         queue.addFirst(chunk)
+        checkInvariants()
+    }
+
+    /**
+     * 区间所有权不变量自检（仅 debug 构建生效，release 下整个函数体被编译器消掉）。
+     *
+     * 校验两件事：
+     *  1. 池内所有区间两两不重叠 —— 一旦重叠，两个 worker 会下同一段、重复写盘；
+     *  2. 所有区间都落在 `[0, total)` 内 —— 越界写会直接损坏文件。
+     *
+     * 这条断言就是为「派发总字节超过文件体积」那个 bug 加的防线：
+     * 以后谁再动调度逻辑，测试没覆盖到的地方也能在 debug 跑挂暴露出来。
+     */
+    private fun checkInvariants() {
+        if (!ENABLE_INVARIANTS) return
+        val snapshot = queue.toList().sortedBy { it.start }
+        var prevEnd = -1L
+        for (chunk in snapshot) {
+            check(chunk.start in 0 until total) {
+                "区间起点越界: ${chunk.start} 不在 [0, $total)"
+            }
+            check(chunk.end in 0 until total) {
+                "区间终点越界: ${chunk.end} 不在 [0, $total)"
+            }
+            check(chunk.start <= chunk.end) {
+                "区间非法: ${chunk.start} > ${chunk.end}"
+            }
+            check(chunk.start > prevEnd) {
+                "区间重叠: 上一段结束于 $prevEnd，这一段却从 ${chunk.start} 开始"
+            }
+            prevEnd = chunk.end
+        }
     }
 
     /**
@@ -1221,15 +1296,26 @@ internal class SlicePool(val total: Long) {
         if (victim.length <= target.toLong()) {
             // 已经切到目标粒度了，别再无谓地碎片化
             queue.addLast(victim)
+            checkInvariants()
             return null
         }
 
         val half = victim.length / 2
         queue.addLast(Chunk(0, victim.start + half, victim.end))
         splits.incrementAndGet()
+        checkInvariants()
         return Chunk(0, victim.start, victim.start + half - 1)
     }
 }
+
+/**
+ * 是否开启 [SlicePool] 的区间不变量自检。
+ *
+ * 只在 debug 构建打开：release 下 `checkInvariants()` 会在第一次 `if` 就返回，
+ * 连 `queue.toList()` 的分配都省掉，零运行时开销。
+ */
+private val ENABLE_INVARIANTS: Boolean =
+    runCatching { Class.forName("com.artifactboost.app.BuildConfig") }.isSuccess
 
 /**
  * 汇总各分块进度，节流后回调给 UI。
