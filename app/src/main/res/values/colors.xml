@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#0969DA</color>
+    <!--
+      图标背景：品牌图形本身是「白底纸雕」设计（蓝紫双闪电 + 淡白描边），
+      背景跟随用纯白，图形边缘的白色描边才能融进背景。
+      换成深色会让描边变成一圈突兀的「贴纸白边」。
+    -->
+    <color name="ic_launcher_background">#FFFFFF</color>
     <!-- 启动窗口底色，与 Compose 主题的 canvas 保持一致（浅色） -->
     <color name="ab_window_background">#F6F8FA</color>
 </resources>

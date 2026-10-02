@@ -1,5 +1,6 @@
 package com.artifactboost.app.ui.screens
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -37,6 +39,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -45,6 +48,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.artifactboost.app.ArtifactBoostApp
+import com.artifactboost.app.R
 import com.artifactboost.app.ui.components.IconBadge
 import com.artifactboost.app.ui.components.InlineBanner
 import com.artifactboost.app.ui.theme.AppTheme
@@ -92,7 +96,14 @@ fun LoginScreen() {
             verticalArrangement = Arrangement.spacedBy(10.dp),
             modifier = Modifier.padding(top = 22.dp, bottom = 2.dp),
         ) {
-            IconBadge(Icons.Filled.Bolt, colors.blue, 64.dp)
+            // 用真实的应用图标（双闪电品牌图形），而不是通用闪电字形
+            Image(
+                painter = painterResource(R.drawable.ab_brand_mark),
+                contentDescription = null,
+                modifier = Modifier
+                    .height(72.dp)
+                    .width(48.dp),
+            )
             Text("ArtifactBoost", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = colors.strongText)
             Text(
                 "GitHub 产物 · 发行版 · 源码 · 构建日志\n多通道并发加速下载",

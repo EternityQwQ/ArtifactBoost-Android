@@ -1,4 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  自适应图标：前景是「双闪电」品牌图形（drawable-*dpi/ic_launcher_foreground.png），
+  背景纯白 —— 与图形自带的淡白描边同色，系统在圆形 / 方形 / squircle
+  等各种裁切下都能得到干净、不发灰的一枚图标。
+
+  前景 PNG 已按自适应图标规范绘制：432×432 画布，主体只占中央约 62%，
+  确保被裁到 72dp 安全区后图形依然完整、不顶边。
+-->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <background android:drawable="@color/ic_launcher_background" />
     <foreground android:drawable="@drawable/ic_launcher_foreground" />
