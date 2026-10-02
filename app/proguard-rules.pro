@@ -1,13 +1,20 @@
-# 默认保留，必要时按需收紧
--dontwarn okhttp3.**
--dontwarn okio.**
-
-# kotlinx.serialization 生成的序列化器
+# kotlinx.serialization 生成的序列化器需要保留
 -keepattributes *Annotation*, InnerClasses
 -dontnote kotlinx.serialization.**
--keepclassmembers class com.local.artifactboost.data.** {
+-keepclassmembers class kotlinx.serialization.json.** {
     *** Companion;
 }
--keepclasseswithmembers class com.local.artifactboost.data.** {
+-keepclasseswithmembers class kotlinx.serialization.json.** {
     kotlinx.serialization.KSerializer serializer(...);
 }
+-keep,includedescriptorclasses class com.artifactboost.app.**$$serializer { *; }
+-keepclassmembers class com.artifactboost.app.** {
+    *** Companion;
+}
+-keepclasseswithmembers class com.artifactboost.app.** {
+    kotlinx.serialization.KSerializer serializer(...);
+}
+
+# OkHttp
+-dontwarn okhttp3.**
+-dontwarn okio.**

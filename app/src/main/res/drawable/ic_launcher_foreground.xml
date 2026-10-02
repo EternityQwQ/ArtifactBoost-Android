@@ -4,11 +4,8 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- 下载箭头 + 底座：和 iOS 版一样表达「加速下载」 -->
+    <!-- 闪电：对应 App 的「加速」主题 -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M50,28h8v28h8l-12,14 -12,-14h8z" />
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M34,76h40v6h-40z" />
+        android:pathData="M60,26 L42,58 L53,58 L48,82 L67,50 L56,50 Z" />
 </vector>

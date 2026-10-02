@@ -1,56 +1,47 @@
 plugins {
-    alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
-    alias(libs.plugins.kotlin.serialization)
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
+    id("org.jetbrains.kotlin.plugin.serialization")
 }
 
 android {
-    namespace = "com.local.artifactboost"
-    compileSdk = 34
+    namespace = "com.artifactboost.app"
+    compileSdk = 35
+    // 明确指定本机已安装的 Build Tools，避免 AGP 去找默认版本 34.0.0
+    buildToolsVersion = "35.0.0"
 
     defaultConfig {
-        applicationId = "com.local.artifactboost"
+        applicationId = "com.artifactboost.app"
         minSdk = 24
-        targetSdk = 34
-        versionCode = 2
-        versionName = "1.1"
-
+        targetSdk = 35
+        versionCode = 1
+        versionName = "1.2"
         vectorDrawables { useSupportLibrary = true }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+        debug {
+            applicationIdSuffix = ".debug"
         }
     }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-        // 时间格式化全部基于 java.time（API 26+），开启脱糖让它们在 API 24/25 上也能跑。
-        // 不开的话代码能编译，但在 Android 7.0 上一调用 NoClassDefFoundError 直接崩。
-        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
         jvmTarget = "17"
-        freeCompilerArgs += listOf(
-            // 列表的 stickyHeader 目前还是实验性 API，显式 opt-in 才不报错
-            "-opt-in=androidx.compose.foundation.ExperimentalFoundationApi",
-        )
     }
 
     buildFeatures {
         compose = true
-    }
-
-    // Kotlin 1.9.x 需要显式指定 Compose 编译器版本（2.0 起才由 kotlin 插件托管）
-    composeOptions {
-        kotlinCompilerExtensionVersion = libs.versions.composeCompiler.get()
+        buildConfig = true
     }
 
     packaging {
@@ -61,31 +52,30 @@ android {
 }
 
 dependencies {
-    coreLibraryDesugaring(libs.desugar.jdk.libs)
+    val composeBom = platform("androidx.compose:compose-bom:2024.10.01")
+    implementation(composeBom)
 
-    implementation(libs.androidx.core.ktx)
-    implementation(libs.androidx.lifecycle.runtime.ktx)
-    implementation(libs.androidx.lifecycle.viewmodel.compose)
-    implementation(libs.androidx.activity.compose)
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    implementation("androidx.navigation:navigation-compose:2.8.4")
 
-    implementation(platform(libs.androidx.compose.bom))
-    implementation(libs.androidx.compose.ui)
-    implementation(libs.androidx.compose.ui.graphics)
-    implementation(libs.androidx.compose.ui.tooling.preview)
-    implementation(libs.androidx.compose.material3)
-    implementation(libs.androidx.compose.material.icons)
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
 
-    implementation(libs.okhttp)
-    implementation(libs.kotlinx.coroutines.android)
-    implementation(libs.kotlinx.serialization.json)
-    implementation(libs.androidx.datastore.preferences)
+    // 网络：OkHttp 负责 HTTP，kotlinx.serialization 负责 JSON
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
-    debugImplementation(libs.androidx.compose.ui.tooling)
-}
+    // Token 加密存储 + 图片加载（对应 iOS 的 AsyncImage）
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("io.coil-kt:coil-compose:2.7.0")
 
-android {
-    lint {
-        xmlReport = true
-        htmlReport = true
-    }
+    debugImplementation("androidx.compose.ui:ui-tooling")
 }

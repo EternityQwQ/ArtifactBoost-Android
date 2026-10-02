@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<network-security-config>
-    <!-- 全程 HTTPS：Token 和签名地址都不允许走明文 -->
-    <base-config cleartextTrafficPermitted="false">
-        <trust-anchors>
-            <certificates src="system" />
-        </trust-anchors>
-    </base-config>
-</network-security-config>

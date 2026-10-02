@@ -1,15 +1,26 @@
-*.iml
+# Gradle
 .gradle/
-/local.properties
-/.idea/
-.DS_Store
-/build
-/app/build
-/captures
-.externalNativeBuild
-.cxx
+build/
 local.properties
+
+# Android Studio
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# 产物
 *.apk
 *.aab
+*.ap_
+*.dex
+
+# 签名
+*.jks
 *.keystore
 !debug.keystore
+
+# 系统
+.DS_Store
+Thumbs.db

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 已下载的产物放在应用私有外部目录的 Artifacts/ 下 -->
+    <external-files-path name="artifacts" path="Artifacts/" />
+    <files-path name="internal_artifacts" path="Artifacts/" />
+    <cache-path name="cache" path="." />
+</paths>

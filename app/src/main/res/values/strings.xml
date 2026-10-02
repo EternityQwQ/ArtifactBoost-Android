@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">ArtifactBoost</string>
+    <string name="download_channel_name">下载任务</string>
+    <string name="download_channel_desc">显示正在进行的产物下载</string>
 </resources>
