@@ -2,6 +2,7 @@ package com.artifactboost.app.download
 
 import com.artifactboost.app.data.GitHubClient
 import com.artifactboost.app.data.ScoredRoute
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -18,6 +19,7 @@ import java.io.File
 import java.io.IOException
 import java.io.RandomAccessFile
 import java.util.concurrent.ConcurrentLinkedDeque
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -318,7 +320,7 @@ class DownloadEngine {
             // 先探测体积 + 确认服务器是否真的支持 Range
             val probe = if (allowChunking) probeSize(urls) else null
             val total = probe?.total
-            val lanes = connections.coerceIn(1, 64)
+            val lanes = connections.coerceIn(1, MAX_LANES)
 
             if (total == null || total <= 0) {
                 // 探测不到体积（不少接口不回 Content-Length）：
@@ -388,7 +390,7 @@ class DownloadEngine {
         // 长链路下单连接带宽就是天花板，开再多「车道」也没用。
         // 因此这里显式只允许 HTTP/1.1，让每条车道各自占一条 TCP —— 真正并行。
         // 同时拆成多个 OkHttpClient（各自独立连接池），进一步保证连接不复用。
-        val sessionCount = minOf(4, maxOf(1, lanes / 8))
+        val sessionCount = minOf(8, maxOf(1, lanes / 8))
         val perSessionLimit = maxOf(1, lanes / sessionCount)
         // 调度器的排队上限要比实际并发宽一些：某条连接卡住时，
         // 后面的请求不至于被它的配额堵在门外。
@@ -412,6 +414,13 @@ class DownloadEngine {
         }
         synchronized(clients) { clients.addAll(sessionClients) }
         allClients.addAll(sessionClients)
+
+        // 关键：Dispatchers.IO 默认最多 64 条线程。lanes 超过 64 时，多出来的
+        // worker 会一直排在 IO 池队列里等线程 —— 「选了 512 却只跑 64」的元凶就是它。
+        // 所以给本次下载建一个专属固定线程池：runSlice 里全是阻塞 IO
+        // （execute() + 写盘），每条车道独占一条线程最直接，下载结束整体回收。
+        // （声明在 try 外面：finally 里要 close 它。）
+        val enginePool = Executors.newFixedThreadPool(lanes).asCoroutineDispatcher()
 
         try {
             val direct = urls.first()
@@ -452,7 +461,7 @@ class DownloadEngine {
                     // 起步瞬间几百个请求同时砸过去，Azure/Cloudflare 会直接回 503 ServerBusy，
                     // 一旦被限流就得指数退避，整段下载反而更慢。
                     // 改成每 CONNECTION_RAMP_INTERVAL_MS 放一档，跑到目标并发后再全速调度。
-                    var allowedLanes = minOf(RAMP_STEP, lanes)
+                    var allowedLanes = minOf(rampStepFor(lanes), lanes)
                     var lastRampAt = System.nanoTime()
 
                     while (true) {
@@ -466,7 +475,7 @@ class DownloadEngine {
                         if (allowedLanes < lanes &&
                             (nowNanos - lastRampAt) / 1_000_000 >= CONNECTION_RAMP_INTERVAL_MS
                         ) {
-                            allowedLanes = minOf(allowedLanes + RAMP_STEP, lanes)
+                            allowedLanes = minOf(allowedLanes + rampStepFor(lanes), lanes)
                             lastRampAt = nowNanos
                         }
 
@@ -507,7 +516,7 @@ class DownloadEngine {
                                 ),
                             )
 
-                            jobs += launch(Dispatchers.IO) {
+                            jobs += launch(enginePool) {
                                 runSlice(
                                     laneId = laneId,
                                     channel = channel,
@@ -545,6 +554,7 @@ class DownloadEngine {
             accumulator.finish(total)
             return outFile
         } finally {
+            enginePool.close()
             synchronized(clients) { clients.removeAll(sessionClients) }
             sessionClients.forEach {
                 allClients.remove(it)
@@ -787,6 +797,9 @@ class DownloadEngine {
         const val MAX_ATTEMPTS = 3
         const val PROGRESS_INTERVAL_MS = 250L
 
+        /** 引擎并发上限（与 AccelerationSettings.MAX_CONNECTIONS 一致） */
+        const val MAX_LANES = 512
+
         /** 单连接模式判断「能否升级为分段」时试探的字节数 */
         const val SINGLE_PROBE_BYTES = 64 * 1024
 
@@ -794,10 +807,15 @@ class DownloadEngine {
          * 渐进建连：每档放开多少条并发。
          *
          * 爬坡的目的是避开「起步瞬间几百个请求同时砸过去 → 503 ServerBusy」，
-         * 但步子太小会白白浪费前几秒带宽。16 是个平衡点：
-         * 单通道下 4 档（约 0.45s）就能顶到 64 并发，既不会一开始就被限流，
+         * 但步子太小会白白浪费前几秒带宽。16 是 64 并发下的平衡点：
+         * 单通道下 4 档（约 0.45s）就能顶满，既不会一开始就被限流，
          * 也不至于让用户觉得「怎么慢慢悠悠的」。
+         *
+         * 极限档（128/256/512）如果仍按 16/档，爬满要 4.8s，起步太肉 ——
+         * 所以按 lanes/8 取步长：512 → 64/档 → 8 档 ≈ 1.2s；64 及以下仍是 16/档。
          */
+        fun rampStepFor(lanes: Int): Int = maxOf(RAMP_STEP, lanes / 8)
+
         const val RAMP_STEP = 16
 
         /** 渐进建连：每隔多少毫秒放开一档（配合 RAMP_STEP 决定爬坡总时长） */
@@ -1084,45 +1102,46 @@ private suspend fun fetchSlice(
 
         val startedAt = System.nanoTime()
         try {
-            // 阻塞 IO 放到 IO 线程池；Call 登记后 cancel() 能立刻打断它
-            val data = withContext(Dispatchers.IO) {
-                val call = channel.client.newCall(request)
-                inflight.register(call)
-                try {
-                    call.execute().use { response ->
-                        when (response.code) {
-                            206, 200 -> Unit
-                            429, 503 -> {
-                                pool.throttles.incrementAndGet()
-                                board.throttles.incrementAndGet()
-                                // 通道级降额：不是简单降权重，而是直接把它判为「被限流」，
-                                // 调度器下一轮就会削它的并发，避免越限越死。
-                                channel.throttled = true
-                                board.penalize(channel.name)
-                                throw DownloadException.Throttled(
-                                    response.code,
-                                    DownloadEngine.retryAfter(response.headers),
-                                )
-                            }
-                            else -> throw DownloadException.BadResponse
+            // worker 已跑在本次下载的专属线程池上（见 segmentDownload 的 enginePool），
+            // 这里直接阻塞执行 —— 不能再丢回 Dispatchers.IO：它只有 64 条线程，
+            // lanes 超过 64 时会把实际并发钉死在 64。
+            // Call 登记后 cancel() 依然能立刻打断阻塞中的 execute()。
+            val call = channel.client.newCall(request)
+            inflight.register(call)
+            val data = try {
+                call.execute().use { response ->
+                    when (response.code) {
+                        206, 200 -> Unit
+                        429, 503 -> {
+                            pool.throttles.incrementAndGet()
+                            board.throttles.incrementAndGet()
+                            // 通道级降额：不是简单降权重，而是直接把它判为「被限流」，
+                            // 调度器下一轮就会削它的并发，避免越限越死。
+                            channel.throttled = true
+                            board.penalize(channel.name)
+                            throw DownloadException.Throttled(
+                                response.code,
+                                DownloadEngine.retryAfter(response.headers),
+                            )
                         }
-                        channel.throttled = false
-                        val body = response.body ?: throw DownloadException.BadResponse
-                        val buffer = ByteArray(chunk.length.toInt())
-                        var received = 0
-                        body.byteStream().use { input ->
-                            while (received < buffer.size) {
-                                val read = input.read(buffer, received, buffer.size - received)
-                                if (read <= 0) break
-                                received += read
-                            }
-                        }
-                        if (received <= 0) throw DownloadException.Incomplete
-                        buffer to received
+                        else -> throw DownloadException.BadResponse
                     }
-                } finally {
-                    inflight.release(call)
+                    channel.throttled = false
+                    val body = response.body ?: throw DownloadException.BadResponse
+                    val buffer = ByteArray(chunk.length.toInt())
+                    var received = 0
+                    body.byteStream().use { input ->
+                        while (received < buffer.size) {
+                            val read = input.read(buffer, received, buffer.size - received)
+                            if (read <= 0) break
+                            received += read
+                        }
+                    }
+                    if (received <= 0) throw DownloadException.Incomplete
+                    buffer to received
                 }
+            } finally {
+                inflight.release(call)
             }
             return SliceOutcome(data.first, data.second, System.nanoTime() - startedAt)
         } catch (e: CancellationException) {

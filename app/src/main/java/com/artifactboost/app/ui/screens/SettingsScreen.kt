@@ -234,14 +234,27 @@ fun SettingsScreen() {
                         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text("并发连接数", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = colors.strongText)
+                                // 7 个档位一行放不下，拆两行：常规档 + 极限档
                                 SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                                    AccelerationSettings.CONNECTION_OPTIONS.forEachIndexed { index, count ->
+                                    AccelerationSettings.CONNECTION_OPTIONS.take(4).forEachIndexed { index, count ->
                                         SegmentedButton(
                                             selected = settings.connections == count,
                                             onClick = { persist(settings.copy(connections = count)) },
                                             shape = SegmentedButtonDefaults.itemShape(
                                                 index = index,
-                                                count = AccelerationSettings.CONNECTION_OPTIONS.size,
+                                                count = 4,
+                                            ),
+                                        ) { Text("$count", fontSize = 13.sp) }
+                                    }
+                                }
+                                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                                    AccelerationSettings.CONNECTION_OPTIONS.drop(4).forEachIndexed { index, count ->
+                                        SegmentedButton(
+                                            selected = settings.connections == count,
+                                            onClick = { persist(settings.copy(connections = count)) },
+                                            shape = SegmentedButtonDefaults.itemShape(
+                                                index = index,
+                                                count = AccelerationSettings.CONNECTION_OPTIONS.size - 4,
                                             ),
                                         ) { Text("$count", fontSize = 13.sp) }
                                     }
@@ -287,7 +300,7 @@ fun SettingsScreen() {
                             Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                                 Text(settings.mode.detail, fontSize = 11.sp, color = colors.subtle)
                                 Text(
-                                    "并发数越大越能跑满带宽；绿色网络环境建议 32~64，一般 16 即可。设置会自动保存，下载时直接生效。",
+                                    "并发数越大越能跑满带宽；绿色网络环境建议 32~64，一般 16 即可。128 以上属于极限档：适合千兆内网/高速 Wi-Fi，普通宽带吃不满，且更容易被 CDN 限流（引擎会自动退避降速，不会失败）。设置会自动保存，下载时直接生效。",
                                     fontSize = 11.sp,
                                     color = colors.subtle,
                                 )
