@@ -138,7 +138,7 @@ internal data class Chunk(
  * 并发重试时 A 切到直连、B 又切回去，兜底形同虚设。
  * 现在重试只用局部下标选地址，不再变异共享状态。
  */
-private class RouteChannel(
+internal class RouteChannel(
     val client: OkHttpClient,
     val endpoints: List<String>,
     val speedHint: Double,
@@ -511,6 +511,10 @@ class DownloadEngine {
 
                         // 1) 把并发顶到「当前允许值」；通道被限流时按配额收缩
                         var assigned = false
+                        // 尾段只派快通道：剩的不够全员分时，再按权重抽中慢线，
+                        // 整体完成时间就被最慢那一片 gate 住。
+                        val tailIsolated =
+                            isTailRemaining((total - written.get()).coerceAtLeast(0), lanes)
                         while (jobs.size < allowedLanes) {
                             // 此刻实际可用的并发额度：被限流的通道要临时降额，
                             // 免得在同一根已经饱和的线路上继续加压、越限越死。
@@ -524,7 +528,8 @@ class DownloadEngine {
                             if (jobs.size >= quota) break
 
                             val work = nextWork(pool, jobs.size, lanes, total) ?: break
-                            val channelIndex = pickChannel(channels, roundRobin)
+                            val channelIndex =
+                                pickChannel(channels, roundRobin, excludeThrottled = tailIsolated)
                             val channel = channels[channelIndex]
                             roundRobin = (roundRobin + 1) % channels.size
 
@@ -930,6 +935,54 @@ internal fun sliceTarget(lanes: Int, total: Long, remaining: Long): Int {
     return share.coerceIn(MIN_SLICE_TARGET.toLong(), MAX_SLICE_TARGET.toLong()).toInt()
 }
 
+/**
+ * 是否进入「尾段」：剩余数据已经不够把所有 lane 按最小片喂饱。
+ *
+ * 这个点之后并行度必然坍缩（剩 1MB、lanes=64 时最多十几条有活干），
+ * 策略必须从「带宽叠加」切换成「别让慢线拖尾」：只派给快通道、
+ * 单片按 BDP 取大、慢片超时让位。阈值自适应 lanes，不用额外常数。
+ */
+internal fun isTailRemaining(remaining: Long, lanes: Int): Boolean =
+    remaining < lanes.toLong() * MIN_SLICE_TARGET * 2L
+
+/**
+ * 单片按带宽时延积（BDP）保底：在快通道上别用 64KB 小片去交 RTT 税。
+ *
+ * 每片至少覆盖 [TAIL_BDP_SECONDS] 秒的传输量（按该通道实测速度），
+ * 否则 64KB 在 150ms RTT 下有效吞吐只有体感的 1/10，还顺手把 QPS
+ * 打到 Azure/Cloudflare 的 429/503 线上。慢通道不受影响（floor 小），
+ * 初始未测速时 measuredSpeed≈1 也近似无操作。调用方仍需以 current.length 为上限。
+ */
+internal const val TAIL_BDP_SECONDS = 0.25
+
+internal fun bdpFloorBytes(measuredSpeed: Double): Int =
+    (measuredSpeed * TAIL_BDP_SECONDS).toLong()
+        .coerceIn(0L, MAX_SLICE_TARGET.toLong()).toInt()
+
+/** 结合剩余量与通道速度算出本片要多少字节（纯函数，便于单测）。 */
+internal fun sliceWant(
+    lanes: Int,
+    total: Long,
+    remaining: Long,
+    currentLen: Int,
+    measuredSpeed: Double,
+): Int {
+    val base = sliceTarget(lanes, total, remaining)
+    val want = maxOf(base, minOf(bdpFloorBytes(measuredSpeed), currentLen))
+    return want.coerceIn(1, currentLen)
+}
+
+/** 单片可接受的最低平均速度：低于它就不是慢、是卡住，直接超时让位。 */
+internal const val MIN_ACCEPTABLE_SLICE_SPEED = 50L * 1024L
+
+/**
+ * 单片总耗时上限：按最低可接受速度推导，另设 20s 下限兜住小片。
+ * 64KB~1MB 片约 20s，4MB 片约 80s。命中后抛 Incomplete 走既有重试换线，
+ * 把区间让给快通道，而不是攥着尾段干等到 120s readTimeout。
+ */
+internal fun sliceTimeoutMs(length: Long): Long =
+    maxOf(20_000L, length * 1000L / MIN_ACCEPTABLE_SLICE_SPEED)
+
 /** 没活儿可派时的等待时长：刚起步就快查快切，收尾时慢一点 */
 private fun delayFor(pool: SlicePool, live: Int, lanes: Int, startedAt: Long): Long {
     val warmingUp = (System.nanoTime() - startedAt) / 1_000_000 < 2_000
@@ -937,10 +990,11 @@ private fun delayFor(pool: SlicePool, live: Int, lanes: Int, startedAt: Long): L
         warmingUp -> 30L
         pool.backlog > 0 -> 20L
         live >= lanes -> 60L
-        live > 1 -> 80L
-        // 只剩自己一条时也别睡太久：这个分支每多睡一次，
-        // 就是在「明明还能切分尾部、却白白空等」的时间上加一笔
-        else -> 120L
+        // 尾段小片几十 ms 就能跑完，80/120ms 的空转会直接吃掉吞吐。
+        // 收尾 live 小恰恰是最需要快查快切的时候：宁可多转几圈（仍有 sleep 不会烧 CPU），
+        // 也别在「明明还能切分尾部、却白白空等」上加时间。
+        live > 1 -> 50L
+        else -> 25L
     }
 }
 
@@ -985,7 +1039,8 @@ private suspend fun runSlice(
         val remaining = (total - written.get()).coerceAtLeast(0)
 
         // 只取这一小片。取满整段时 current.length 本身就不足 target，coerceIn 保证不越界。
-        val want = sliceTarget(lanes, total, remaining).coerceIn(1, current.length.toInt())
+        // 快通道按 BDP 取大片：摊薄每片一次 HTTP 往返的 RTT 税，尾段 QPS 也顺势降下来。
+        val want = sliceWant(lanes, total, remaining, current.length.toInt(), channel.measuredSpeed)
         val from = current.start
         val to = from + want - 1
 
@@ -1030,6 +1085,7 @@ private suspend fun runSlice(
                 laneId = laneId,
                 channel = channel,
                 channels = channels,
+                tailIsolated = isTailRemaining(remaining, lanes),
             )
             outcome = result.first
             winner = result.second
@@ -1138,6 +1194,7 @@ private suspend fun fetchSlice(
     laneId: Int,
     channel: RouteChannel,
     channels: List<RouteChannel>,
+    tailIsolated: Boolean = false,
 ): Triple<SliceOutcome, RouteChannel, String> {
     var lastError: Exception = DownloadException.BadResponse
     var attempt = 0
@@ -1163,11 +1220,11 @@ private suspend fun fetchSlice(
                 url = direct.primary
             } else {
                 // plan 里没有直连：用该通道自带的兜底（即直连 URL）
-                active = channels[pickRetryChannel(channels, channel.name)]
+                active = channels[pickRetryChannel(channels, channel.name, tailIsolated)]
                 url = active.fallback
             }
         } else {
-            active = channels[pickRetryChannel(channels, channel.name)]
+            active = channels[pickRetryChannel(channels, channel.name, tailIsolated)]
             url = active.primary
         }
         // 兜底地址即直连：成功不清除镜像的限流标记，归因清晰。
@@ -1216,8 +1273,14 @@ private suspend fun fetchSlice(
                     val body = response.body ?: throw DownloadException.BadResponse
                     val buffer = ByteArray(chunk.length.toInt())
                     var received = 0
+                    // 慢片超时：单片总耗时封顶，超时即放弃本片走换线重试，
+                    // 把区间让给快通道 —— 尾段不再被一条卡住的连接 gate 住。
+                    val sliceDeadlineNanos = startedAt + sliceTimeoutMs(chunk.length) * 1_000_000L
                     body.byteStream().use { input ->
                         while (received < buffer.size) {
+                            if (System.nanoTime() > sliceDeadlineNanos) {
+                                throw DownloadException.Incomplete
+                            }
                             val read = input.read(buffer, received, buffer.size - received)
                             if (read <= 0) break
                             received += read
@@ -1297,19 +1360,30 @@ private fun writeAt(output: RandomAccessFile, offset: Long, data: ByteArray, len
  *
  * 老实现是贪心取最快，导致所有 lane 挤在同一条通道/同一连接池，
  * 既打爆单镜像（429/503）又浪费其它通道带宽。
+ *
+ * @param excludeThrottled 尾段隔离：直接排除被限流通道（而不是只降权），
+ *        剩的不够全员分时不再给慢线派尾片。全部被排除时退回普通加权保底不断流。
  */
-private fun pickChannel(channels: List<RouteChannel>, hint: Int): Int {
+internal fun pickChannel(channels: List<RouteChannel>, hint: Int, excludeThrottled: Boolean = false): Int {
     if (channels.size == 1) return 0
     var total = 0.0
     val weights = DoubleArray(channels.size)
     for ((i, ch) in channels.withIndex()) {
+        if (excludeThrottled && ch.throttled) {
+            weights[i] = 0.0
+            continue
+        }
         var w = maxOf(ch.measuredSpeed, 1.0)
         // 被限流的通道降权 90%，而不是直接剔除（保底不断流）
         if (ch.throttled) w *= 0.1
         weights[i] = w
         total += w
     }
-    if (total <= 0) return hint % channels.size
+    // 尾段隔离把全部通道都排除时：退回普通加权，保底不断流
+    if (total <= 0) {
+        if (excludeThrottled) return pickChannel(channels, hint, excludeThrottled = false)
+        return hint % channels.size
+    }
     var r = Math.random() * total
     for (i in weights.indices) {
         r -= weights[i]
@@ -1323,12 +1397,20 @@ private fun pickChannel(channels: List<RouteChannel>, hint: Int): Int {
  * 排除是为了“首失败即换线”：一直加权随机仍可能连抽同一条坏线，
  * 白白浪费 `MAX_ATTEMPTS` 里宝贵的第二次机会。
  */
-private fun pickRetryChannel(channels: List<RouteChannel>, excluding: String): Int {
+internal fun pickRetryChannel(
+    channels: List<RouteChannel>,
+    excluding: String,
+    excludeThrottled: Boolean = false,
+): Int {
     if (channels.size == 1) return 0
     var total = 0.0
     val weights = DoubleArray(channels.size)
     for ((i, ch) in channels.withIndex()) {
         if (ch.name == excluding) {
+            weights[i] = 0.0
+            continue
+        }
+        if (excludeThrottled && ch.throttled) {
             weights[i] = 0.0
             continue
         }
