@@ -113,7 +113,7 @@ data class AccelerationSettings(
     val testedSpeed: Double = 0.0,
     val testedAtMillis: Long? = null,
 ) {
-    val clampedConnections: Int get() = connections.coerceIn(1, 64)
+    val clampedConnections: Int get() = connections.coerceIn(1, MAX_CONNECTIONS)
 
     /**
      * 下载开始时**直接沿用**测速结果的有效期。
@@ -190,7 +190,12 @@ data class AccelerationSettings(
     }
 
     companion object {
-        val CONNECTION_OPTIONS = listOf(8, 16, 32, 64)
+        /** 引擎接受的并发上限。128 属于极限档：吃千兆内网/高速 Wi-Fi 用，
+         *  普通宽带吃不满，且更容易被 CDN 限流（引擎会自动退让，不会失败）。 */
+        const val MAX_CONNECTIONS = 128
+
+        /** 设置页档位 */
+        val CONNECTION_OPTIONS = listOf(8, 16, 32, 64, 128)
 
         private const val PREFS_NAME = "artifactboost_settings"
         private const val KEY_CONNECTIONS = "ab.connections"

@@ -330,7 +330,7 @@ fun SettingsScreen() {
                             Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
                                 Text(settings.mode.detail, fontSize = 11.sp, color = colors.subtle)
                                 Text(
-                                    "并发数越大越能跑满带宽；绿色网络环境建议 32~64，一般 16 即可。设置会自动保存，下载时直接生效。",
+                                    "并发数越大越能跑满带宽；绿色网络环境建议 32~64，一般 16 即可，千兆内网/高速 Wi-Fi 可试 128。被限流时引擎会自动退让并把活儿转给健康通道，不会失败。设置会自动保存，下载时直接生效。",
                                     fontSize = 11.sp,
                                     color = colors.subtle,
                                 )

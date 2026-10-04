@@ -79,4 +79,84 @@ class MarkdownParserTest {
         assertEquals("https://ci", pictures[0].link)
         assertEquals("https://lic", pictures[1].link)
     }
+
+    // ---------- 内嵌 HTML 归一化（normalizeHtml） ----------
+
+    @Test
+    fun `div centered img becomes picture paragraph`() {
+        val md = "<div align=\"center\">\n<img src=\"https://example.com/icon.png\" alt=\"Air\" width=\"80\">\n</div>"
+        val blocks = MarkdownParser.parse(md)
+        val para = blocks.filterIsInstance<MDBlock.Paragraph>().single()
+        val pic = para.segments.filterIsInstance<MDInline.Picture>().single()
+        assertEquals("https://example.com/icon.png", pic.url)
+        assertEquals("Air", pic.alt)
+        // div 标签本身不能泄漏到任何块里
+        assertTrue(blocks.none { b -> b.toString().contains("<div") })
+    }
+
+    @Test
+    fun `html heading becomes markdown heading`() {
+        val md = "<h1 align=\"center\">Air</h1>"
+        val blocks = MarkdownParser.parse(md)
+        val heading = blocks.filterIsInstance<MDBlock.Heading>().single()
+        assertEquals(1, heading.level)
+        assertEquals("Air", heading.text)
+    }
+
+    @Test
+    fun `a wrapping img becomes linked picture`() {
+        val md = "<a href=\"https://github.com/x/y/releases\">\n<img src=\"https://img.shields.io/badge/dl-1.2.3-blue\" alt=\"Downloads\">\n</a>"
+        val blocks = MarkdownParser.parse(md)
+        val para = blocks.filterIsInstance<MDBlock.Paragraph>().single()
+        val pic = para.segments.filterIsInstance<MDInline.Picture>().single()
+        assertEquals("https://img.shields.io/badge/dl-1.2.3-blue", pic.url)
+        assertEquals("Downloads", pic.alt)
+        assertEquals("https://github.com/x/y/releases", pic.link)
+    }
+
+    @Test
+    fun `html entity in badge url is decoded`() {
+        val md = "<img src=\"https://img.shields.io/badge/style-flat&amp;logo=android\" alt=\"style\">"
+        val blocks = MarkdownParser.parse(md)
+        val para = blocks.filterIsInstance<MDBlock.Paragraph>().single()
+        val pic = para.segments.filterIsInstance<MDInline.Picture>().single()
+        assertEquals("https://img.shields.io/badge/style-flat&logo=android", pic.url)
+    }
+
+    @Test
+    fun `html inside code fence stays untouched`() {
+        val md = "```html\n<h1 align=\"center\">Air</h1>\n<img src=\"x.png\">\n```"
+        val blocks = MarkdownParser.parse(md)
+        val code = blocks.filterIsInstance<MDBlock.Code>().single()
+        assertTrue(code.content.contains("<h1 align=\"center\">Air</h1>"))
+        assertTrue(code.content.contains("<img src=\"x.png\">"))
+    }
+
+    @Test
+    fun `typography tags are stripped keeping content`() {
+        val md = "<p>\n<sub>Powerful note &amp; text</sub>\n</p>"
+        val blocks = MarkdownParser.parse(md)
+        val para = blocks.filterIsInstance<MDBlock.Paragraph>().single()
+        val text = para.segments.filterIsInstance<MDInline.Text>().joinToString("") { it.value }
+        assertEquals("Powerful note & text", text.trim())
+    }
+
+    @Test
+    fun `unknown tags are stripped as fallback`() {
+        val md = "<video controls>\n<source src=\"a.mp4\">\n</video>\n正文"
+        val blocks = MarkdownParser.parse(md)
+        val para = blocks.filterIsInstance<MDBlock.Paragraph>().single()
+        val text = para.segments.filterIsInstance<MDInline.Text>().joinToString("") { it.value }
+        assertTrue(text.contains("正文"))
+        assertTrue(!text.contains("<video") && !text.contains("<source"))
+    }
+
+    @Test
+    fun `escaped entity does not become a real tag`() {
+        val md = "示例 &lt;div align=&quot;center&quot;&gt; 保持原样"
+        val blocks = MarkdownParser.parse(md)
+        val para = blocks.filterIsInstance<MDBlock.Paragraph>().single()
+        val text = para.segments.filterIsInstance<MDInline.Text>().joinToString("") { it.value }
+        assertTrue(text.contains("<div align=\"center\">"))
+    }
 }
