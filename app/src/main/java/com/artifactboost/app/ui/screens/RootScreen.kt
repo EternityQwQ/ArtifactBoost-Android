@@ -1,6 +1,7 @@
 package com.artifactboost.app.ui.screens
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -23,6 +24,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavType
@@ -54,6 +59,10 @@ fun RootScreen() {
     val states by downloads.states.collectAsStateWithLifecycle()
 
     var selected by remember { mutableStateOf(RootTab.Repos) }
+    // 原神彩蛋：长按「设置」tab 弹出确认框，确认后才跳官网，不做后台静默下载
+    var showGenshinEgg by remember { mutableStateOf(false) }
+    val uriHandler = LocalUriHandler.current
+    val haptics = LocalHapticFeedback.current
     val activeCount = states.values.count {
         it is com.artifactboost.app.download.DownloadState.Downloading ||
             it is com.artifactboost.app.download.DownloadState.Resolving
@@ -70,6 +79,21 @@ fun RootScreen() {
             NavigationBar(containerColor = colors.surface) {
                 RootTab.entries.forEach { tab ->
                     NavigationBarItem(
+                        // 长按「设置」触发原神彩蛋：只监听长按，短按仍走 onClick。
+                        // pointerInput + detectTapGestures 不消费短按，点击无延迟；
+                        // 长按后会同时选中设置页 + 弹框，这是可接受的彩蛋行为。
+                        modifier = if (tab == RootTab.Settings) {
+                            Modifier.pointerInput(Unit) {
+                                detectTapGestures(
+                                    onLongPress = {
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        showGenshinEgg = true
+                                    },
+                                )
+                            }
+                        } else {
+                            Modifier
+                        },
                         selected = selected == tab,
                         onClick = { selected = tab },
                         icon = {
@@ -103,6 +127,13 @@ fun RootScreen() {
                 RootTab.Settings -> SettingsScreen()
             }
         }
+    }
+
+    if (showGenshinEgg) {
+        GenshinEasterEggDialog(
+            onDismiss = { showGenshinEgg = false },
+            onOpenOfficialSite = { uriHandler.openUri(GENSHIN_CN_URL) },
+        )
     }
 }
 

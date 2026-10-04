@@ -3,6 +3,8 @@ package com.artifactboost.app.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,8 +48,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -81,7 +85,7 @@ private const val SPEED_TEST_TOTAL_TIMEOUT_MS = 35_000L
  * 设置：账户 + 加速设置（并发 / 通道）+ 通道测速 + 关于。
  * 对应 iOS 版的 SettingsView。
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun SettingsScreen() {
     val colors = AppTheme.colors
@@ -90,11 +94,14 @@ fun SettingsScreen() {
     val downloads = app.downloads
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
+    val haptics = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
 
     val user by session.user.collectAsStateWithLifecycle()
 
     var settings by remember { mutableStateOf(AccelerationSettings.load(context)) }
+    // 原神彩蛋兜底入口：长按顶部「设置」标题同样触发（底部 Tab 手势若被系统消费时仍可发现）
+    var showGenshinEgg by remember { mutableStateOf(false) }
     var isTesting by remember { mutableStateOf(false) }
     var testResults by remember { mutableStateOf<List<ScoredRoute>>(emptyList()) }
     var testTargetLabel by remember { mutableStateOf<String?>(null) }
@@ -172,7 +179,22 @@ fun SettingsScreen() {
         containerColor = colors.canvas,
         topBar = {
             TopAppBar(
-                title = { Text("设置", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = colors.strongText) },
+                title = {
+                    Text(
+                        "设置",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp,
+                        color = colors.strongText,
+                        modifier = Modifier.combinedClickable(
+                            onClick = {},
+                            onLongClick = {
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                showGenshinEgg = true
+                            },
+                            onLongClickLabel = "发现彩蛋",
+                        ),
+                    )
+                },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = colors.surface),
             )
         },
@@ -481,6 +503,13 @@ fun SettingsScreen() {
                 }
             }
         }
+    }
+
+    if (showGenshinEgg) {
+        GenshinEasterEggDialog(
+            onDismiss = { showGenshinEgg = false },
+            onOpenOfficialSite = { uriHandler.openUri(GENSHIN_CN_URL) },
+        )
     }
 }
 
