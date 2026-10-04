@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.artifactboost.app.ArtifactBoostApp
 import com.artifactboost.app.data.GHRepo
+import com.artifactboost.app.data.GHWorkflowRun
 import com.artifactboost.app.data.RepoSort
 import com.artifactboost.app.ui.components.CardSurface
 import com.artifactboost.app.ui.components.EmptyStateView
@@ -61,7 +62,10 @@ import kotlinx.coroutines.launch
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SearchScreen(onOpenRepo: (GHRepo) -> Unit = {}) {
+fun SearchScreen(
+    onOpenRepo: (GHRepo) -> Unit = {},
+    onOpenRun: (GHRepo, GHWorkflowRun) -> Unit = { _, _ -> },
+) {
     val colors = AppTheme.colors
     val session = ArtifactBoostApp.instance.session
     val scope = rememberCoroutineScope()
@@ -95,9 +99,9 @@ fun SearchScreen(onOpenRepo: (GHRepo) -> Unit = {}) {
 
     fun openDirect() {
         val client = session.client.value ?: return
-        val fullName = parseFullName(directInput)
-        if (fullName == null) {
-            directError = "格式不对，示例：cli/cli 或 https://github.com/cli/cli"
+        val target = parseDirectTarget(directInput)
+        if (target == null) {
+            directError = "格式不对，示例：cli/cli 或 https://github.com/cli/cli/actions/runs/123456"
             return
         }
         isOpening = true
@@ -105,9 +109,21 @@ fun SearchScreen(onOpenRepo: (GHRepo) -> Unit = {}) {
         errorMessage = null
         scope.launch {
             try {
-                val repo = client.repo(fullName)
-                directInput = ""
-                onOpenRepo(repo)
+                when (target) {
+                    is DirectTarget.Repo -> {
+                        val repo = client.repo(target.fullName)
+                        directInput = ""
+                        onOpenRepo(repo)
+                    }
+                    is DirectTarget.Run -> {
+                        // actions 链接：先拿仓库（拿到 Models），再拿单次运行，
+                        // 直接跳构建详情而非仓库主页。
+                        val repo = client.repo(target.fullName)
+                        val run = client.workflowRun(target.fullName, target.runId)
+                        directInput = ""
+                        onOpenRun(repo, run)
+                    }
+                }
             } catch (e: Exception) {
                 directError = session.message(e)
             }
@@ -131,11 +147,11 @@ fun SearchScreen(onOpenRepo: (GHRepo) -> Unit = {}) {
             contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            // 直接打开仓库
+            // 直接打开仓库 / Actions 链接
             item {
                 CardSurface {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("直接打开仓库", fontSize = 12.sp, color = colors.muted, fontWeight = FontWeight.SemiBold)
+                        Text("直接打开仓库 / Actions", fontSize = 12.sp, color = colors.muted, fontWeight = FontWeight.SemiBold)
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -144,7 +160,7 @@ fun SearchScreen(onOpenRepo: (GHRepo) -> Unit = {}) {
                                 value = directInput,
                                 onValueChange = { directInput = it },
                                 modifier = Modifier.weight(1f),
-                                placeholder = { Text("owner/repo 或 GitHub 链接", fontSize = 13.sp) },
+                                placeholder = { Text("owner/repo 或 Actions 链接", fontSize = 13.sp) },
                                 leadingIcon = { Icon(Icons.Filled.Link, contentDescription = null, tint = colors.muted) },
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(
@@ -167,7 +183,8 @@ fun SearchScreen(onOpenRepo: (GHRepo) -> Unit = {}) {
                             InlineBanner(directError!!, colors.orange, Icons.Filled.Warning)
                         }
                         Text(
-                            "贴一个仓库地址就能进去下载，例如 cli/cli 或 https://github.com/cli/cli",
+                            "贴仓库地址进仓库主页；贴 actions/runs 链接直达该次构建，例如 " +
+                                "https://github.com/owner/repo/actions/runs/37171664473",
                             fontSize = 11.sp,
                             color = colors.subtle,
                         )
@@ -248,9 +265,21 @@ fun SearchScreen(onOpenRepo: (GHRepo) -> Unit = {}) {
 }
 
 /**
- * 支持 owner/repo、github.com/owner/repo、完整链接（多余路径会被截掉）。
+ * 直接打开的目标：仓库主页，或某次 Actions 运行（构建详情）。
+ *
+ * 支持：
+ * - owner/repo
+ * - https://github.com/owner/repo
+ * - https://github.com/owner/repo/actions/runs/37171664473
+ *   （后面再跟 /jobs/…、/attempts/…、?query、#fragment 都会被忽略，只取 runId）
+ * - 裸 owner/repo/actions/runs/37171664473（无 scheme 的简写同样识别）
  */
-fun parseFullName(raw: String): String? {
+sealed interface DirectTarget {
+    data class Repo(val fullName: String) : DirectTarget
+    data class Run(val fullName: String, val runId: Long) : DirectTarget
+}
+
+fun parseDirectTarget(raw: String): DirectTarget? {
     var text = raw.trim()
     if (text.isEmpty()) return null
     // 从 Markdown 里复制时常见的 <https://github.com/owner/repo> 包裹
@@ -262,7 +291,7 @@ fun parseFullName(raw: String): String? {
     val lower = text.lowercase()
     val looksLikeUrl = text.contains("://") || lower.contains("github.com")
     if (!looksLikeUrl) {
-        // 裸 owner/repo 分支：之前实现强制要求 host 含 github.com，
+        // 裸输入分支：之前实现强制要求 host 含 github.com，
         // 导致最常见的 "cli/cli" 输入永远返回 null，这就是直接打开无效的主因。
         val clean = text.substringBefore('?').substringBefore('#').trim()
         val parts = clean.split('/').map { it.trim() }.filter { it.isNotEmpty() }
@@ -271,7 +300,16 @@ fun parseFullName(raw: String): String? {
         var repo = parts[1]
         if (repo.lowercase().endsWith(".git")) repo = repo.dropLast(4)
         if (!isValidRepoPart(owner) || !isValidRepoPart(repo)) return null
-        return "$owner/$repo"
+        val fullName = "$owner/$repo"
+        // 裸 actions 简写：owner/repo/actions/runs/<runId>
+        if (parts.size >= 5 &&
+            parts[2].equals("actions", ignoreCase = true) &&
+            parts[3].equals("runs", ignoreCase = true)
+        ) {
+            val runId = parts[4].toLongOrNull()
+            if (runId != null && runId > 0) return DirectTarget.Run(fullName, runId)
+        }
+        return DirectTarget.Repo(fullName)
     }
 
     if (!text.contains("://")) text = "https://$text"
@@ -287,7 +325,30 @@ fun parseFullName(raw: String): String? {
     var repo = parts[1]
     if (repo.lowercase().endsWith(".git")) repo = repo.dropLast(4)
     if (!isValidRepoPart(parts[0]) || !isValidRepoPart(repo)) return null
-    return "${parts[0]}/$repo"
+    val fullName = "${parts[0]}/$repo"
+    // actions 链接：…/owner/repo/actions/runs/<runId>[…]
+    // 大小写不敏感；runId 后面跟 jobs/attempts 等多余路径直接忽略。
+    for (i in parts.indices) {
+        if (parts[i].equals("actions", ignoreCase = true) &&
+            i + 2 < parts.size &&
+            parts[i + 1].equals("runs", ignoreCase = true)
+        ) {
+            val runId = parts[i + 2].toLongOrNull()
+            if (runId != null && runId > 0) return DirectTarget.Run(fullName, runId)
+            break
+        }
+    }
+    return DirectTarget.Repo(fullName)
+}
+
+/**
+ * 支持 owner/repo、github.com/owner/repo、完整链接（多余路径会被截掉）。
+ * actions/runs 链接会退化为仓库名（只取 owner/repo 部分）。
+ */
+fun parseFullName(raw: String): String? = when (val target = parseDirectTarget(raw)) {
+    is DirectTarget.Repo -> target.fullName
+    is DirectTarget.Run -> target.fullName
+    null -> null
 }
 
 private val RepoNamePart = Regex("^[A-Za-z0-9_.-]+$")

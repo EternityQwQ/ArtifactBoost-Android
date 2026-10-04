@@ -227,6 +227,14 @@ private fun SearchTabNavHost(onBackAtRoot: () -> Boolean) {
                     repoById[repo.fullName] = repo
                     navController.navigate("repo/${java.net.URLEncoder.encode(repo.fullName, "UTF-8")}")
                 },
+                onOpenRun = { repo, run ->
+                    // 直接打开 actions/runs 链接：直跳构建详情，不经过仓库主页
+                    repoById[repo.fullName] = repo
+                    runById["${repo.fullName}#${run.id}"] = run
+                    navController.navigate(
+                        "run/${java.net.URLEncoder.encode(repo.fullName, "UTF-8")}/${run.id}",
+                    )
+                },
             )
         }
 

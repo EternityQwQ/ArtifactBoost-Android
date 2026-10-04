@@ -164,6 +164,10 @@ class GitHubClient(val token: String) {
         get<RunsResponse>("repos/${repo.fullName}/actions/runs", mapOf("per_page" to "30"))
             .workflowRuns
 
+    /** 取单次 workflow 运行（「直接打开 Actions 链接」用） */
+    suspend fun workflowRun(fullName: String, runId: Long): GHWorkflowRun =
+        get("repos/$fullName/actions/runs/$runId")
+
     /** 某次运行产生的产物列表 */
     suspend fun artifacts(repo: GHRepo, run: GHWorkflowRun): List<GHArtifact> =
         get<ArtifactsResponse>(
