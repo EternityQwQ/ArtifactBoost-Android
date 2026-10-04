@@ -16,7 +16,7 @@ GitHub Actions 产物加速下载器。**多线程 + HTTP Range 分段并发 + �
 | **构建详情** | 构建日志 + 该次运行的全部产物，一键盘下载 |
 | **正式版详情** | Release 附件 + 对应 tag 的源码包 |
 | **下载管理** | 进度、实时速度、通道说明、取消 / 重试 / 完成后导出分享 |
-| **前台服务** | 下载在通知栏持续运行，锁屏 / 切后台不中断 |
+| **后台下载** | 前台服务保活（锁屏 / 切后台不中断）+ 未完成任务落盘，进程被杀后下次启动自动续下 |
 
 ---
 
@@ -122,7 +122,8 @@ app/src/main/java/com/artifactboost/app/
 ├─ download/
 │  ├─ DownloadEngine.kt       # ★ 分段并发下载核心
 │  ├─ DownloadManager.kt      # 任务调度 / 通道选择 / 重试
-│  └─ DownloadService.kt      # 前台服务 + 通知进度
+│  ├─ DownloadService.kt      # 前台服务 + 通知进度
+│  └─ DownloadTaskStore.kt    # 未完成任务落盘（杀进程后自动续下）
 ├─ ui/
 │  ├─ theme/Theme.kt          # GitHub Primer 配色（浅色/深色）
 │  ├─ components/             # 通用组件（卡片 / 胶囊 / 骨架屏 …）

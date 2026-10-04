@@ -116,5 +116,9 @@ class DownloadService : Service() {
                 context.startService(intent)
             }
         }
+
+        fun stop(context: Context) {
+            context.stopService(Intent(context, DownloadService::class.java))
+        }
     }
 }

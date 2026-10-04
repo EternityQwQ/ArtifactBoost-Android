@@ -1,18 +1,24 @@
 package com.artifactboost.app.data
 
 import com.artifactboost.app.util.formatTimestamp
+import kotlinx.serialization.Serializable
 
+@Serializable
 enum class ArchiveFormat(val path: String, val fileExtension: String, val title: String) {
     ZIP("zipball", "zip", "ZIP"),
     TARBALL("tarball", "tar.gz", "TAR.GZ"),
 }
 
 /** 能加速下载的东西：构建产物 / 构建日志 / 发行版附件 / 源码包 */
+@Serializable
 sealed class DownloadSource {
     abstract val repo: String
 
+    @Serializable
     data class Artifact(override val repo: String, val id: Long) : DownloadSource()
+    @Serializable
     data class RunLogs(override val repo: String, val runId: Long) : DownloadSource()
+    @Serializable
     data class ReleaseAsset(
         override val repo: String,
         val assetId: Long,
@@ -27,6 +33,7 @@ sealed class DownloadSource {
          */
         val browserUrl: String? = null,
     ) : DownloadSource()
+    @Serializable
     data class SourceArchive(
         override val repo: String,
         val ref: String,
@@ -62,6 +69,7 @@ sealed class DownloadSource {
 }
 
 /** 界面上一行「可下载项」 */
+@Serializable
 data class DownloadItem(
     val id: String,
     val title: String,

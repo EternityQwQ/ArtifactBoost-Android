@@ -4,6 +4,7 @@ import android.app.Application
 import com.artifactboost.app.data.AccelerationSettings
 import com.artifactboost.app.data.SessionManager
 import com.artifactboost.app.download.DownloadManager
+import com.artifactboost.app.download.DownloadService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -34,6 +35,9 @@ class ArtifactBoostApp : Application() {
             session.restore()
             // 恢复出登录态后再补拉一次用户信息
             session.refreshUser()
+            // 后台续下：上次进程被杀时没下完的任务自动恢复，并挂起前台服务保活
+            val resumed = downloads.restorePending()
+            if (resumed > 0) DownloadService.start(this@ArtifactBoostApp)
         }
 
         // 预热一次设置（同样是磁盘读，放 IO）

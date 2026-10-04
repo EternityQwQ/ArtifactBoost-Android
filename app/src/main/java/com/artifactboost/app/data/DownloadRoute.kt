@@ -2,6 +2,7 @@ package com.artifactboost.app.data
 
 import android.content.Context
 import android.content.SharedPreferences
+import kotlinx.serialization.Serializable
 import java.net.URLEncoder
 
 /**
@@ -87,6 +88,7 @@ data class ScoredRoute(
     val speed: Double,
 )
 
+@Serializable
 enum class RouteMode(val title: String, val detail: String) {
     DIRECT("直连", "直接连 GitHub 存储，最安全，但国内通常很慢"),
     SMART("智能加速", "直连与公共镜像多通道并行，带宽叠加"),

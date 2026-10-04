@@ -68,6 +68,9 @@ class DownloadManager(
     private val engines = mutableMapOf<String, DownloadEngine>()
     private val jobs = mutableMapOf<String, Job>()
 
+    /** 未完成任务的落盘：进程被杀后靠它自动续下 */
+    private val taskStore = DownloadTaskStore(appContext)
+
     /** 引擎落盘用的私有暂存目录；完成后会自动复制一份到系统公共下载目录 */
     val outputDir: File
         get() = File(appContext.getExternalFilesDir(null) ?: appContext.filesDir, "Artifacts")
@@ -100,6 +103,8 @@ class DownloadManager(
         _items.value = _items.value + (item.id to item)
         _states.value = _states.value + (item.id to DownloadState.Resolving)
         _routeSummary.value = _routeSummary.value - item.id
+        // 先落盘再开工：中途进程被杀，下次启动能按这份记录续下
+        taskStore.save(TaskRecord.from(item, settings))
 
         val engine = DownloadEngine()
         engines[item.id] = engine
@@ -121,11 +126,15 @@ class DownloadManager(
                 _states.value = _states.value + (
                     item.id to DownloadState.Finished(file, published?.uri, published?.displayPath)
                     )
+                // 下完了：清掉落盘记录，避免重启后复活
+                taskStore.remove(item.id)
             } catch (e: Exception) {
                 if (isCancellation(e)) {
                     _states.value = _states.value + (item.id to DownloadState.Idle)
                 } else {
                     _states.value = _states.value + (item.id to DownloadState.Failed(e.message ?: "下载失败"))
+                    // 失败不自动续下：清记录，用户手动重试时会重新落盘
+                    taskStore.remove(item.id)
                 }
             } finally {
                 engines.remove(item.id)
@@ -139,6 +148,8 @@ class DownloadManager(
         jobs[item.id]?.cancel()
         jobs.remove(item.id)
         engines.remove(item.id)
+        // 用户主动取消：清记录，不恢复
+        taskStore.remove(item.id)
         _states.value = _states.value + (item.id to DownloadState.Idle)
     }
 
@@ -147,6 +158,7 @@ class DownloadManager(
         jobs[item.id]?.cancel()
         engines.remove(item.id)
         jobs.remove(item.id)
+        taskStore.remove(item.id)
         _states.value = _states.value - item.id
         _routeSummary.value = _routeSummary.value - item.id
         _items.value = _items.value - item.id
@@ -162,6 +174,26 @@ class DownloadManager(
                 else -> Unit
             }
         }
+    }
+
+    /**
+     * 后台恢复：进程重启后把上次没下完的任务自动续上。
+     *
+     * 必须在登录态恢复之后调（无 client 时直接返回，记录保留待下次启动）。
+     * 签名地址有时效，恢复即重新解析，不沿用死时的旧地址。
+     *
+     * @return 实际重新入队的任务数，调用方据此决定是否拉起前台服务。
+     */
+    suspend fun restorePending(): Int = withContext(Dispatchers.IO) {
+        val records = taskStore.loadAll()
+        if (records.isEmpty()) return@withContext 0
+        if (session.client.value == null) return@withContext 0
+        var started = 0
+        for (record in records) {
+            start(record.item, record.toSettings())
+            started++
+        }
+        started
     }
 
     private companion object {
