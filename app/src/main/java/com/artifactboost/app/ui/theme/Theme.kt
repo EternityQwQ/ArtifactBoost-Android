@@ -3,6 +3,7 @@ package com.artifactboost.app.ui.theme
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
@@ -22,12 +23,18 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
- * 视觉规范：配色与控件都对齐 GitHub 移动端（Primer 调色板）。
- * 对应 iOS 版的 Theme.swift。
+ * Material Design 3 主题。
+ *
+ * 分层说明（M3 规范做法）：
+ * - 表面 / 背景 / 主色：走 [MaterialTheme.colorScheme]，支持动态取色（Monet），
+ *   浅色/深色/动态三套都是完整的 M3 tonal 色板，不会再冒出默认紫。
+ * - 语义色（构建状态红/绿、语言色、Primer 蓝/紫/橙）：走 [LocalAppColors]，
+ *   承载信息、不随壁纸变色，保证“成功永远是绿、失败永远是红”。
+ *
+ * 对应 iOS 版的 Theme.swift（Primer 调色板）。
  */
 object Theme {
-    // MARK: - Primer 调色板（浅色 / 深色两套）
-
+    // Primer 调色板（浅色 / 深色两套，只做语义色）
     val blueLight = Color(0xFF0969DA); val blueDark = Color(0xFF2F81F7)
     val greenLight = Color(0xFF1F883D); val greenDark = Color(0xFF3FB950)
     val redLight = Color(0xFFCF222E); val redDark = Color(0xFFF85149)
@@ -43,7 +50,7 @@ object Theme {
     val strongTextLight = Color(0xFF1F2328); val strongTextDark = Color(0xFFE6EDF3)
 }
 
-/** 主题色板，通过 CompositionLocal 下发，方便各组件取用原始 Primer 色值 */
+/** 语义色板：只放“带信息”的颜色，表面色一律从 MaterialTheme.colorScheme 取 */
 data class AppColors(
     val blue: Color,
     val green: Color,
@@ -83,11 +90,7 @@ object AppTheme {
         @Composable @ReadOnlyComposable get() = LocalAppColors.current
 }
 
-/**
- * MD3 圆角规范。之前的圆角都是各组件里写死的 `RoundedCornerShape(8.dp)`，
- * 这里统一到 Material 3 的 shape scale（extraSmall → extraLarge），
- * 组件改成从 `MaterialTheme.shapes` 取，视觉一致性自然就有了。
- */
+/** M3 shape scale：extraSmall → extraLarge，组件统一从 MaterialTheme.shapes 取 */
 private val AppShapes = Shapes(
     extraSmall = RoundedCornerShape(6.dp),
     small = RoundedCornerShape(10.dp),
@@ -97,25 +100,30 @@ private val AppShapes = Shapes(
 )
 
 /**
- * MD3 字阶：只微调最常用的几档，其余沿用默认，
- * 保证「标题更紧、正文更松」的 MD3 阅读节奏。
+ * M3 字阶：标题更紧、正文更松。
+ * display/headline 沿用默认，title/label 加粗半档，labelSmall 带字距。
  */
 private val AppTypography = Typography().let { base ->
     base.copy(
-        titleLarge = base.titleLarge.copy(fontWeight = FontWeight.SemiBold),
-        titleMedium = base.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-        labelLarge = base.labelLarge.copy(fontWeight = FontWeight.SemiBold),
-        // 数值/统计类文本用等宽，数字跳动时不会左右晃
+        displayLarge = base.displayLarge.copy(letterSpacing = (-0.25).sp),
+        displayMedium = base.displayMedium.copy(letterSpacing = 0.sp),
+        headlineLarge = base.headlineLarge.copy(fontWeight = FontWeight.SemiBold),
+        headlineMedium = base.headlineMedium.copy(fontWeight = FontWeight.SemiBold),
+        headlineSmall = base.headlineSmall.copy(fontWeight = FontWeight.SemiBold),
+        titleLarge = base.titleLarge.copy(fontWeight = FontWeight.SemiBold, letterSpacing = 0.sp),
+        titleMedium = base.titleMedium.copy(fontWeight = FontWeight.SemiBold, letterSpacing = 0.1.sp),
+        titleSmall = base.titleSmall.copy(fontWeight = FontWeight.SemiBold, letterSpacing = 0.1.sp),
+        bodyLarge = base.bodyLarge.copy(letterSpacing = 0.15.sp),
+        bodyMedium = base.bodyMedium.copy(letterSpacing = 0.15.sp),
+        labelLarge = base.labelLarge.copy(fontWeight = FontWeight.SemiBold, letterSpacing = 0.1.sp),
+        labelMedium = base.labelMedium.copy(fontWeight = FontWeight.Medium, letterSpacing = 0.3.sp),
         labelSmall = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.Medium, letterSpacing = 0.4.sp),
     )
 }
 
 /**
- * 是否启用 Android 12+ 的动态取色（Monet）。
- *
- * 默认开启：用户的系统主题色会渗透到 App 的主色上，这是 MD3 的标志性体验。
- * 但 App 的**语义色**（语言色、运行状态红/绿）仍走 Primer 固定值 ——
- * 那些颜色承载信息，不能被主题色改掉。
+ * 是否启用 Android 12+ 动态取色（Monet）。M3 标志性体验，默认开。
+ * 开启后主色/表面跟随壁纸，语义色（红/绿/蓝…）仍钉死在 Primer 上。
  */
 private const val USE_DYNAMIC_COLOR = true
 
@@ -159,11 +167,11 @@ fun ArtifactBoostTheme(
         )
     }
 
-    // 动态取色（仅 Android 12+）。开启时优先用系统色，
-    // 但把 App 自己的语义色（红/绿/蓝…）与背景、表面色继续钉在 Primer 上，
-    // 保证运行状态、语言色这些「带信息」的颜色不会被主题化。
     val context = LocalContext.current
-    val scheme = when {
+    val scheme: ColorScheme = when {
+        // M3 动态取色：表面/主色跟随系统壁纸，只把语义槽钉死。
+        // 之前实现把 background/surface 也钉回 Primer，等于关掉了动态取色的
+        // tonal 表面——这里改成保留系统 tonal，只替换信息色。
         dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
             val dynamic = if (darkTheme) {
                 dynamicDarkColorScheme(context)
@@ -171,34 +179,22 @@ fun ArtifactBoostTheme(
                 dynamicLightColorScheme(context)
             }
             dynamic.copy(
-                // 语义色钉死，不随系统主题漂移
                 secondary = colors.green,
-                error = colors.red,
+                onSecondary = Color.White,
+                secondaryContainer = colors.green.copy(alpha = 0.16f),
+                onSecondaryContainer = colors.green,
                 tertiary = colors.purple,
-                // 画布/表面给回 App 自己的层次，避免动态色把卡片和背景调成同色
-                background = colors.canvas,
-                onBackground = colors.strongText,
-                surface = colors.surface,
-                onSurface = colors.strongText,
-                surfaceVariant = colors.border,
-                onSurfaceVariant = colors.muted,
-                outline = colors.border,
-                outlineVariant = colors.border,
-                surfaceContainer = colors.surface,
-                surfaceContainerLow = colors.surface,
-                surfaceContainerHighest = colors.canvas,
+                onTertiary = Color.White,
+                tertiaryContainer = colors.purple.copy(alpha = 0.16f),
+                onTertiaryContainer = colors.purple,
+                error = colors.red,
+                onError = Color.White,
+                errorContainer = colors.red.copy(alpha = 0.14f),
+                onErrorContainer = colors.red,
             )
         }
-        darkTheme -> fullScheme(
-            darkColorScheme(),
-            colors,
-            onPrimary = Color.White,
-        )
-        else -> fullScheme(
-            lightColorScheme(),
-            colors,
-            onPrimary = Color.White,
-        )
+        darkTheme -> DarkScheme(colors)
+        else -> LightScheme(colors)
     }
 
     CompositionLocalProvider(LocalAppColors provides colors) {
@@ -211,64 +207,83 @@ fun ArtifactBoostTheme(
     }
 }
 
-/**
- * 把一个基础 ColorScheme 补齐成「MD3 全槽位」。
- *
- * 老实现只填了 9 个槽（primary/onPrimary/secondary/background/onBackground/
- * surface/onSurface/outline/error），其余全落到 MD3 的**默认紫**上 ——
- * 于是任何用到 `surfaceVariant`、`surfaceContainerHigh`、`inverseSurface` 的
- * MD3 组件（NavigationBar、BottomSheet、Menu、Snackbar…）都会冒出紫色，
- * 跟 App 的配色打架。这里一次性补全，MD3 化才算真的完成。
- */
-private fun fullScheme(
-    base: androidx.compose.material3.ColorScheme,
-    colors: AppColors,
-    onPrimary: Color,
-): androidx.compose.material3.ColorScheme = base.copy(
+/** 浅色 M3 全色板：以 Primer 蓝为 primary，表面走 GitHub canvas/surface 层级 */
+private fun LightScheme(colors: AppColors): ColorScheme = lightColorScheme(
     primary = colors.blue,
-    onPrimary = onPrimary,
-    primaryContainer = colors.blue.copy(alpha = 0.12f),
-    onPrimaryContainer = colors.blue,
-    inversePrimary = colors.blue,
-
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFE1EDFB),
+    onPrimaryContainer = Color(0xFF0550AE),
+    inversePrimary = Color(0xFF8AB4F8),
     secondary = colors.green,
-    onSecondary = onPrimary,
-    secondaryContainer = colors.green.copy(alpha = 0.12f),
-    onSecondaryContainer = colors.green,
-
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFE4F0E7),
+    onSecondaryContainer = Color(0xFF0F5132),
     tertiary = colors.purple,
-    onTertiary = onPrimary,
-    tertiaryContainer = colors.purple.copy(alpha = 0.12f),
-    onTertiaryContainer = colors.purple,
-
+    onTertiary = Color.White,
+    tertiaryContainer = Color(0xFFEDE7FB),
+    onTertiaryContainer = Color(0xFF4C1D95),
     background = colors.canvas,
     onBackground = colors.strongText,
-
     surface = colors.surface,
     onSurface = colors.strongText,
-    surfaceVariant = colors.border,
+    surfaceVariant = Color(0xFFE7EAEE),
     onSurfaceVariant = colors.muted,
     surfaceTint = colors.blue,
     inverseSurface = colors.strongText,
     inverseOnSurface = colors.surface,
-
-    // MD3 的「表面容器」层级：从最低到最高，给卡片/底栏/弹窗做层次
     surfaceContainerLowest = colors.surface,
-    surfaceContainerLow = colors.surface,
-    surfaceContainer = colors.surface,
-    surfaceContainerHigh = colors.surface,
-    surfaceContainerHighest = colors.canvas,
-
+    surfaceContainerLow = colors.canvas,
+    surfaceContainer = Color(0xFFEFF1F3),
+    surfaceContainerHigh = Color(0xFFEAECEF),
+    surfaceContainerHighest = Color(0xFFE3E6EA),
     surfaceBright = colors.surface,
-    surfaceDim = colors.canvas,
-
+    surfaceDim = Color(0xFFDDE0E3),
     error = colors.red,
-    onError = onPrimary,
-    errorContainer = colors.red.copy(alpha = 0.12f),
-    onErrorContainer = colors.red,
-
+    onError = Color.White,
+    errorContainer = Color(0xFFFCE8E9),
+    onErrorContainer = Color(0xFF7D1A1F),
     outline = colors.border,
-    outlineVariant = colors.border,
+    outlineVariant = colors.border.copy(alpha = 0.6f),
+    scrim = Color.Black,
+)
+
+/** 深色 M3 全色板：表面层级上亮下暗，卡片比背景高一层 */
+private fun DarkScheme(colors: AppColors): ColorScheme = darkColorScheme(
+    primary = colors.blue,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFF1B2F4C),
+    onPrimaryContainer = Color(0xFFBCD6FA),
+    inversePrimary = colors.blue,
+    secondary = colors.green,
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFF14331F),
+    onSecondaryContainer = Color(0xFF9EE6B0),
+    tertiary = colors.purple,
+    onTertiary = Color.White,
+    tertiaryContainer = Color(0xFF2E2148),
+    onTertiaryContainer = Color(0xFFD5BFFC),
+    background = colors.canvas,
+    onBackground = colors.strongText,
+    surface = colors.surface,
+    onSurface = colors.strongText,
+    surfaceVariant = Color(0xFF2A3036),
+    onSurfaceVariant = colors.muted,
+    surfaceTint = colors.blue,
+    inverseSurface = colors.strongText,
+    inverseOnSurface = colors.surface,
+    surfaceContainerLowest = Color(0xFF0B0E13),
+    surfaceContainerLow = colors.canvas,
+    surfaceContainer = colors.surface,
+    surfaceContainerHigh = Color(0xFF1C2128),
+    surfaceContainerHighest = Color(0xFF262C34),
+    surfaceBright = Color(0xFF2A3038),
+    surfaceDim = Color(0xFF0B0E13),
+    error = colors.red,
+    onError = Color.White,
+    errorContainer = Color(0xFF4A1518),
+    onErrorContainer = Color(0xFFFFB4AB),
+    outline = colors.border,
+    outlineVariant = colors.border.copy(alpha = 0.7f),
     scrim = Color.Black,
 )
 

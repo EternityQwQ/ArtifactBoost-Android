@@ -4,6 +4,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -11,7 +12,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -23,6 +23,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
@@ -40,11 +41,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.artifactboost.app.ArtifactBoostApp
 import com.artifactboost.app.data.GHRepo
 import com.artifactboost.app.data.GHWorkflowRun
@@ -132,11 +131,13 @@ fun SearchScreen(
     }
 
     Scaffold(
-        containerColor = colors.canvas,
         topBar = {
             TopAppBar(
-                title = { Text("搜索", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = colors.strongText) },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = colors.surface),
+                title = { Text("搜索", style = MaterialTheme.typography.titleLarge) },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                    scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ),
             )
         },
     ) { padding ->
@@ -144,14 +145,18 @@ fun SearchScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+            contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             // 直接打开仓库 / Actions 链接
             item {
                 CardSurface {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("直接打开仓库 / Actions", fontSize = 12.sp, color = colors.muted, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "直接打开仓库 / Actions",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -160,23 +165,26 @@ fun SearchScreen(
                                 value = directInput,
                                 onValueChange = { directInput = it },
                                 modifier = Modifier.weight(1f),
-                                placeholder = { Text("owner/repo 或 Actions 链接", fontSize = 13.sp) },
-                                leadingIcon = { Icon(Icons.Filled.Link, contentDescription = null, tint = colors.muted) },
+                                placeholder = { Text("owner/repo 或 Actions 链接") },
+                                leadingIcon = { Icon(Icons.Filled.Link, contentDescription = null) },
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(
                                     keyboardType = KeyboardType.Uri,
                                     imeAction = ImeAction.Go,
                                 ),
                                 keyboardActions = KeyboardActions(onGo = { openDirect() }),
-                                shape = RoundedCornerShape(10.dp),
+                                shape = MaterialTheme.shapes.extraLarge,
                             )
                             if (isOpening) {
-                                CircularProgressIndicator(modifier = Modifier.size(20.dp), color = colors.blue, strokeWidth = 2.dp)
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp,
+                                )
                             } else {
                                 TextButton(
                                     onClick = { openDirect() },
                                     enabled = directInput.isNotBlank(),
-                                ) { Text("打开", fontWeight = FontWeight.SemiBold) }
+                                ) { Text("打开") }
                             }
                         }
                         if (directError != null) {
@@ -185,36 +193,36 @@ fun SearchScreen(
                         Text(
                             "贴仓库地址进仓库主页；贴 actions/runs 链接直达该次构建，例如 " +
                                 "https://github.com/owner/repo/actions/runs/37171664473",
-                            fontSize = 11.sp,
-                            color = colors.subtle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline,
                         )
                     }
                 }
             }
 
-            // 搜索框
+            // 搜索框：M3 搜索框形态（超大圆角 pill）
             item {
                 OutlinedTextField(
                     value = keyword,
                     onValueChange = { keyword = it },
                     modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("搜索 GitHub 仓库", fontSize = 13.sp) },
-                    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, tint = colors.muted) },
+                    placeholder = { Text("搜索 GitHub 仓库") },
+                    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                     trailingIcon = {
                         if (keyword.isNotEmpty()) {
                             IconButton(onClick = { keyword = "" }) {
-                                Icon(Icons.Filled.Clear, contentDescription = "清空", tint = colors.muted)
+                                Icon(Icons.Filled.Clear, contentDescription = "清空")
                             }
                         }
                     },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                     keyboardActions = KeyboardActions(onSearch = { search() }),
-                    shape = RoundedCornerShape(10.dp),
+                    shape = MaterialTheme.shapes.extraLarge,
                 )
             }
 
-            // 排序
+            // 排序：M3 单选分段按钮
             item {
                 SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                     RepoSort.entries.forEachIndexed { index, option ->
@@ -225,7 +233,7 @@ fun SearchScreen(
                                 if (keyword.isNotBlank()) search()
                             },
                             shape = SegmentedButtonDefaults.itemShape(index, RepoSort.entries.size),
-                            label = { Text(option.title, fontSize = 12.sp) },
+                            label = { Text(option.title) },
                         )
                     }
                 }
@@ -238,7 +246,7 @@ fun SearchScreen(
             when {
                 isSearching -> item {
                     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(modifier = Modifier.padding(24.dp), color = colors.blue)
+                        CircularProgressIndicator(modifier = Modifier.padding(24.dp))
                     }
                 }
 
@@ -252,7 +260,13 @@ fun SearchScreen(
                 }
 
                 else -> {
-                    item { Text("${results.size} 个结果", fontSize = 12.sp, color = colors.muted) }
+                    item {
+                        Text(
+                            "${results.size} 个结果",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     items(results, key = { it.id }) { repo ->
                         CardSurface {
                             Box(modifier = Modifier.clickable { onOpenRepo(repo) }) { RepoCardRow(repo) }

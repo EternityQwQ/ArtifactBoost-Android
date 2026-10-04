@@ -19,8 +19,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -669,6 +670,7 @@ fun MarkdownContent(markdown: String, modifier: Modifier = Modifier) {
 
 @Composable
 private fun MarkdownBlockView(block: MDBlock) {
+    val scheme = MaterialTheme.colorScheme
     val colors = AppTheme.colors
 
     when (block) {
@@ -680,7 +682,7 @@ private fun MarkdownBlockView(block: MDBlock) {
                 else -> 13f to FontWeight.Bold
             }
             Text(
-                text = MarkdownInline.render(block.text, size, weight, colors.strongText, colors),
+                text = MarkdownInline.render(block.text, size, weight, scheme.onSurface, colors),
                 modifier = Modifier.padding(top = if (block.level <= 2) 6.dp else 2.dp),
             )
         }
@@ -689,7 +691,7 @@ private fun MarkdownBlockView(block: MDBlock) {
             segments = block.segments,
             fontSize = 14f,
             weight = FontWeight.Normal,
-            color = colors.muted,
+            color = scheme.onSurfaceVariant,
         )
 
         is MDBlock.Bullet -> MarkdownListRow(
@@ -714,47 +716,53 @@ private fun MarkdownBlockView(block: MDBlock) {
                 Modifier
                     .width(3.dp)
                     .heightIn(min = 20.dp)
-                    .background(colors.border),
+                    .background(
+                        MaterialTheme.colorScheme.primary,
+                        MaterialTheme.shapes.extraSmall,
+                    ),
             )
             Box(Modifier.weight(1f)) {
                 MarkdownSegmentFlow(
                     segments = block.segments,
                     fontSize = 14f,
                     weight = FontWeight.Normal,
-                    color = colors.subtle,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontStyle = FontStyle.Italic,
                 )
             }
         }
 
-        is MDBlock.Code -> Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
-                .background(colors.canvas)
-                .border(1.dp, colors.border, RoundedCornerShape(8.dp)),
+        is MDBlock.Code -> Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = MaterialTheme.shapes.small,
+            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+            border = androidx.compose.foundation.BorderStroke(
+                1.dp,
+                MaterialTheme.colorScheme.outlineVariant,
+            ),
         ) {
-            if (block.language != null) {
-                Text(
-                    block.language,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = colors.subtle,
-                    modifier = Modifier.padding(start = 12.dp, top = 8.dp),
-                )
-            }
-            Row(
-                modifier = Modifier
-                    .horizontalScroll(rememberScrollState())
-                    .padding(12.dp),
-            ) {
-                Text(
-                    block.content,
-                    fontSize = 12.5.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = colors.strongText,
-                    softWrap = false,
-                )
+            Column {
+                if (block.language != null) {
+                    Text(
+                        block.language,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 12.dp, top = 8.dp),
+                    )
+                }
+                Row(
+                    modifier = Modifier
+                        .horizontalScroll(rememberScrollState())
+                        .padding(12.dp),
+                ) {
+                    Text(
+                        block.content,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        softWrap = false,
+                    )
+                }
             }
         }
 
@@ -826,7 +834,6 @@ private fun MarkdownSegmentFlow(
 /** 内联 badge / 图片：限高以免撑破版面，加载失败就退回 alt 文字 */
 @Composable
 private fun MarkdownBadge(url: String, alt: String) {
-    val colors = AppTheme.colors
     val target = remember(url) { resolveMarkdownUrl(url) }
 
     if (target == null) {
@@ -841,18 +848,21 @@ private fun MarkdownBadge(url: String, alt: String) {
         modifier = Modifier
             .heightIn(max = 28.dp)
             .widthIn(max = 220.dp)
-            .clip(RoundedCornerShape(4.dp)),
+            .clip(MaterialTheme.shapes.extraSmall),
         loading = {
             Box(
                 modifier = Modifier
                     .width(56.dp)
                     .height(20.dp)
-                    .background(colors.border.copy(alpha = 0.25f), RoundedCornerShape(4.dp)),
+                    .background(
+                        MaterialTheme.colorScheme.surfaceContainerHighest,
+                        MaterialTheme.shapes.extraSmall,
+                    ),
             )
         },
         error = {
             if (alt.isNotEmpty()) {
-                Text(alt, fontSize = 11.sp, color = colors.subtle)
+                Text(alt, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
             }
         },
     )
@@ -865,7 +875,6 @@ private fun MarkdownListRow(
     indent: Int,
     monospaced: Boolean,
 ) {
-    val colors = AppTheme.colors
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -874,8 +883,8 @@ private fun MarkdownListRow(
     ) {
         Text(
             bullet,
-            fontSize = 14.sp,
-            color = colors.subtle,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.outline,
             fontFamily = if (monospaced) FontFamily.Monospace else FontFamily.Default,
         )
         Box(Modifier.weight(1f)) {
@@ -883,7 +892,7 @@ private fun MarkdownListRow(
                 segments = segments,
                 fontSize = 14f,
                 weight = FontWeight.Normal,
-                color = colors.muted,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
@@ -926,31 +935,32 @@ private fun MarkdownTableView(header: List<List<MDInline>>, rows: List<List<List
         }
     }
 
-    Column(
-        modifier = Modifier
-            .clip(RoundedCornerShape(8.dp))
-            .border(1.dp, colors.border, RoundedCornerShape(8.dp))
-            .background(colors.surface),
+    Surface(
+        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
-        Row(Modifier.horizontalScroll(rememberScrollState())) {
-            TableRowView(
-                cells = header,
-                columnCount = columnCount,
-                columnWidths = columnWidths,
-                isHeader = true,
-                isLastRow = false,
-            )
-        }
-        rows.forEachIndexed { rowIndex, cells ->
-            Hairline()
+        Column {
             Row(Modifier.horizontalScroll(rememberScrollState())) {
                 TableRowView(
-                    cells = cells,
+                    cells = header,
                     columnCount = columnCount,
                     columnWidths = columnWidths,
-                    isHeader = false,
-                    isLastRow = rowIndex == rows.lastIndex,
+                    isHeader = true,
+                    isLastRow = false,
                 )
+            }
+            rows.forEachIndexed { rowIndex, cells ->
+                Hairline()
+                Row(Modifier.horizontalScroll(rememberScrollState())) {
+                    TableRowView(
+                        cells = cells,
+                        columnCount = columnCount,
+                        columnWidths = columnWidths,
+                        isHeader = false,
+                        isLastRow = rowIndex == rows.lastIndex,
+                    )
+                }
             }
         }
     }
@@ -964,12 +974,13 @@ private fun TableRowView(
     isHeader: Boolean,
     isLastRow: Boolean,
 ) {
-    val colors = AppTheme.colors
     // 用 IntrinsicSize.Min 让同一行里所有单元格等高、内容垂直居中
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
-            .background(if (isHeader) colors.canvas else Color.Transparent)
+            .background(
+                if (isHeader) MaterialTheme.colorScheme.surfaceContainerHigh else Color.Transparent,
+            )
             .height(IntrinsicSize.Min),
     ) {
         for (index in 0 until columnCount) {
@@ -984,7 +995,11 @@ private fun TableRowView(
                     segments = cell,
                     fontSize = 12f,
                     weight = if (isHeader) FontWeight.Bold else FontWeight.Normal,
-                    color = if (isHeader) colors.strongText else colors.muted,
+                    color = if (isHeader) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
                 )
             }
             if (index < columnCount - 1) {
@@ -993,7 +1008,7 @@ private fun TableRowView(
                     Modifier
                         .width(0.5.dp)
                         .fillMaxHeight()
-                        .background(colors.border),
+                        .background(MaterialTheme.colorScheme.outlineVariant),
                 )
             }
         }
@@ -1023,7 +1038,6 @@ private fun plainText(cells: List<MDInline>): String =
 
 @Composable
 private fun MarkdownImageView(url: String, alt: String) {
-    val colors = AppTheme.colors
     val target = remember(url) { resolveMarkdownUrl(url) }
 
     if (target == null) {
@@ -1037,21 +1051,21 @@ private fun MarkdownImageView(url: String, alt: String) {
         contentScale = ContentScale.Fit,
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp)),
+            .clip(MaterialTheme.shapes.small),
         loading = {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(140.dp)
-                    .background(colors.border.copy(alpha = 0.3f)),
+                    .background(MaterialTheme.colorScheme.surfaceContainerHighest),
                 contentAlignment = Alignment.Center,
             ) { CircularProgressIndicator(modifier = Modifier.width(22.dp), strokeWidth = 2.dp) }
         },
         error = {
             Text(
                 if (alt.isEmpty()) "图片加载失败" else alt,
-                fontSize = 12.sp,
-                color = colors.subtle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline,
             )
         },
     )
@@ -1059,19 +1073,17 @@ private fun MarkdownImageView(url: String, alt: String) {
 
 @Composable
 private fun MarkdownRelativeImageHint(alt: String) {
-    val colors = AppTheme.colors
     // README 里相对路径的图片没法直接加载，提示一下而不是留个空白
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .background(colors.canvas)
-            .padding(10.dp),
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.small,
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
     ) {
         Text(
             if (alt.isEmpty()) "README 内的相对路径图片" else "$alt（相对路径）",
-            fontSize = 12.sp,
-            color = colors.subtle,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(10.dp),
         )
     }
 }

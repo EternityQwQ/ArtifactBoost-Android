@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -18,6 +17,7 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -30,10 +30,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.artifactboost.app.data.ArchiveFormat
 import com.artifactboost.app.data.GHRelease
 import com.artifactboost.app.data.GHRepo
@@ -47,7 +45,7 @@ import com.artifactboost.app.ui.theme.AppTheme
 import com.artifactboost.app.util.formatTimestamp
 import androidx.compose.material.icons.filled.Inventory2
 /**
- * 发行版详情：附件 + 对应 tag 的源码包，都能加速下载。
+ * 发行版详情：附件 + 对应 tag 的源码包，都能加速下载。M3 TopAppBar + 卡片分组。
  * 对应 iOS 版的 ReleaseDetailView。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -58,36 +56,37 @@ fun ReleaseDetailScreen(
     onBack: () -> Unit,
 ) {
     val colors = AppTheme.colors
+    val scheme = MaterialTheme.colorScheme
     val uriHandler = LocalUriHandler.current
     var showNotes by remember { mutableStateOf(false) }
 
     Scaffold(
-        containerColor = colors.canvas,
         topBar = {
             TopAppBar(
                 title = {
                     Text(
                         release.tagName,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp,
-                        color = colors.strongText,
+                        style = MaterialTheme.typography.titleLarge,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = colors.strongText)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
                 actions = {
                     IconButton(onClick = {
                         uriHandler.openUri("https://github.com/${repo.fullName}/releases/tag/${release.tagName}")
                     }) {
-                        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "在 GitHub 打开", tint = colors.muted)
+                        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "在 GitHub 打开")
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = colors.surface),
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = scheme.surfaceContainer,
+                    scrolledContainerColor = scheme.surfaceContainer,
+                ),
             )
         },
     ) { padding ->
@@ -106,34 +105,36 @@ fun ReleaseDetailScreen(
                                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                             ) {
                                 IconBadge(Icons.Filled.Inventory2, colors.purple, size = 38.dp)
-                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Column(
+                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                    modifier = Modifier.weight(1f),
+                                ) {
                                     Text(
                                         release.displayName,
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = colors.strongText,
+                                        style = MaterialTheme.typography.titleMedium,
                                         maxLines = 2,
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                     Text(
                                         "${repo.fullName} · ${release.tagName}",
-                                        fontSize = 11.sp,
-                                        color = colors.subtle,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = scheme.outline,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                 }
-                                Spacer(Modifier.weight(1f))
                                 when {
                                     release.prerelease -> StatusPill("预发布", colors.orange)
-                                    release.draft -> StatusPill("草稿", colors.muted)
+                                    release.draft -> StatusPill("草稿", scheme.outline)
                                     else -> StatusPill("发行版", colors.green)
                                 }
                             }
 
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                formatTimestamp(release.publishedAt)?.let { StatusPill(it, colors.muted) }
-                                StatusPill("${release.assets.size} 个附件", colors.muted)
+                                formatTimestamp(release.publishedAt)?.let {
+                                    StatusPill(it, scheme.onSurfaceVariant)
+                                }
+                                StatusPill("${release.assets.size} 个附件", scheme.onSurfaceVariant)
                             }
                         }
                     }
@@ -149,17 +150,15 @@ fun ReleaseDetailScreen(
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text(
                                     body,
-                                    fontSize = 13.sp,
-                                    color = colors.muted,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = scheme.onSurfaceVariant,
                                     maxLines = if (showNotes) Int.MAX_VALUE else 6,
                                     overflow = TextOverflow.Ellipsis,
-                                    lineHeight = 19.sp,
                                 )
                                 Text(
                                     if (showNotes) "收起" else "展开全部",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = colors.blue,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = scheme.primary,
                                     modifier = Modifier.clickable { showNotes = !showNotes },
                                 )
                             }
@@ -214,13 +213,14 @@ fun ReleaseDetailScreen(
 
 @Composable
 private fun ReleaseSectionHeader(title: String, footnote: String?) {
-    val colors = AppTheme.colors
     Column(
         modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 4.dp),
         verticalArrangement = Arrangement.spacedBy(3.dp),
     ) {
-        Text(title, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = colors.muted)
-        if (footnote != null) Text(footnote, fontSize = 11.sp, color = colors.subtle)
+        Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (footnote != null) {
+            Text(footnote, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+        }
         com.artifactboost.app.ui.components.Hairline()
     }
 }

@@ -22,6 +22,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -35,10 +36,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.artifactboost.app.ArtifactBoostApp
 import com.artifactboost.app.data.GHArtifact
 import com.artifactboost.app.data.GHRepo
@@ -56,7 +55,7 @@ import com.artifactboost.app.util.formatTimestamp
 import kotlinx.coroutines.launch
 
 /**
- * 单次构建：构建日志 + 所有产物，都能加速下载。
+ * 单次构建：构建日志 + 所有产物，都能加速下载。M3 TopAppBar + 卡片分组。
  * 对应 iOS 版的 RunDetailView。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -67,6 +66,7 @@ fun RunDetailScreen(
     onBack: () -> Unit,
 ) {
     val colors = AppTheme.colors
+    val scheme = MaterialTheme.colorScheme
     val session = ArtifactBoostApp.instance.session
     val scope = rememberCoroutineScope()
 
@@ -94,29 +94,29 @@ fun RunDetailScreen(
     LaunchedEffect(run.id) { load() }
 
     Scaffold(
-        containerColor = colors.canvas,
         topBar = {
             TopAppBar(
                 title = {
                     Text(
                         "构建 #${run.runNumber}",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp,
-                        color = colors.strongText,
+                        style = MaterialTheme.typography.titleLarge,
                         maxLines = 1,
                     )
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = colors.strongText)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
                 actions = {
                     IconButton(onClick = { scope.launch { load() } }) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "刷新", tint = colors.muted)
+                        Icon(Icons.Filled.Refresh, contentDescription = "刷新")
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = colors.surface),
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = scheme.surfaceContainer,
+                    scrolledContainerColor = scheme.surfaceContainer,
+                ),
             )
         },
     ) { padding ->
@@ -135,34 +135,38 @@ fun RunDetailScreen(
                                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                             ) {
                                 IconBadge(RunStatus.icon(run), RunStatus.color(run, colors), size = 38.dp)
-                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Column(
+                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                    modifier = Modifier.weight(1f),
+                                ) {
                                     Text(
                                         run.displayTitle ?: run.name ?: "Workflow",
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = colors.strongText,
+                                        style = MaterialTheme.typography.titleMedium,
                                         maxLines = 2,
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                     Text(
                                         "${repo.fullName} · #${run.runNumber}",
-                                        fontSize = 11.sp,
-                                        color = colors.subtle,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = scheme.outline,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
                                 }
-                                Spacer(Modifier.weight(1f))
                                 StatusPill(RunStatus.text(run), RunStatus.color(run, colors))
                             }
 
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                StatusPill(run.headBranch ?: "-", colors.muted, Icons.AutoMirrored.Filled.CallSplit)
-                                run.event?.let { StatusPill(it, colors.muted) }
+                                StatusPill(
+                                    run.headBranch ?: "-",
+                                    scheme.onSurfaceVariant,
+                                    Icons.AutoMirrored.Filled.CallSplit,
+                                )
+                                run.event?.let { StatusPill(it, scheme.onSurfaceVariant) }
                             }
 
                             formatTimestamp(run.createdAt)?.let {
-                                Text(it, fontSize = 11.sp, color = colors.subtle)
+                                Text(it, style = MaterialTheme.typography.labelSmall, color = scheme.outline)
                             }
                         }
                     }
@@ -231,14 +235,13 @@ fun RunDetailScreen(
 
 @Composable
 private fun SectionHeader(title: String, footnote: String?) {
-    val colors = AppTheme.colors
     Column(
         modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 4.dp),
         verticalArrangement = Arrangement.spacedBy(3.dp),
     ) {
-        Text(title, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = colors.muted)
+        Text(title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (footnote != null) {
-            Text(footnote, fontSize = 11.sp, color = colors.subtle)
+            Text(footnote, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
         }
         Hairline()
     }

@@ -1,9 +1,7 @@
 package com.artifactboost.app.ui.screens
 
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -14,19 +12,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -37,19 +34,15 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.artifactboost.app.ArtifactBoostApp
 import com.artifactboost.app.R
-import com.artifactboost.app.ui.components.IconBadge
 import com.artifactboost.app.ui.components.InlineBanner
 import com.artifactboost.app.ui.theme.AppTheme
 import kotlinx.coroutines.launch
@@ -84,7 +77,6 @@ fun LoginScreen() {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(colors.canvas)
             .verticalScroll(rememberScrollState())
             .padding(20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -104,31 +96,36 @@ fun LoginScreen() {
                     .height(72.dp)
                     .width(48.dp),
             )
-            Text("ArtifactBoost", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = colors.strongText)
+            Text("ArtifactBoost", style = MaterialTheme.typography.headlineSmall)
             Text(
                 "GitHub 产物 · 发行版 · 源码 · 构建日志\n多通道并发加速下载",
-                fontSize = 13.sp,
+                style = MaterialTheme.typography.bodyMedium,
                 textAlign = TextAlign.Center,
-                color = colors.muted,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 
-        // Token 卡片
+        // Token 卡片：M3 ElevatedCard
         CardBlock {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Icon(Icons.Filled.Key, contentDescription = null, tint = colors.muted, modifier = Modifier.size(16.dp))
-                    Text("Personal Access Token", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = colors.muted)
+                    Icon(
+                        Icons.Filled.Key,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Text("Personal Access Token", style = MaterialTheme.typography.titleSmall)
                 }
 
                 OutlinedTextField(
                     value = tokenInput,
                     onValueChange = { tokenInput = it },
                     modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("粘贴 Token（ghp_… 或 github_pat_…）", fontSize = 13.sp) },
+                    placeholder = { Text("粘贴 Token（ghp_… 或 github_pat_…）") },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
                     // 注意：不要用 KeyboardType.Password，它在部分国产 ROM 上会强制弹出
@@ -139,7 +136,7 @@ fun LoginScreen() {
                         autoCorrect = false,
                         imeAction = ImeAction.Done,
                     ),
-                    shape = RoundedCornerShape(10.dp),
+                    shape = MaterialTheme.shapes.small,
                 )
 
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -162,8 +159,8 @@ fun LoginScreen() {
                 Text(
                     "想下载别人的公开仓库：classic Token 勾 repo 即可；" +
                         "fine-grained Token 需要在 Account permissions 里允许读取公开仓库。",
-                    fontSize = 11.sp,
-                    color = colors.subtle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
                 )
             }
         }
@@ -178,34 +175,29 @@ fun LoginScreen() {
             }
         }
 
-        // 登录按钮
+        // 登录按钮：M3 FilledButton，走主题 primary（跟随动态取色）
         Button(
             onClick = { login() },
             modifier = Modifier
                 .fillMaxWidth()
                 .height(52.dp),
             enabled = canSubmit,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = colors.green,
-                contentColor = androidx.compose.ui.graphics.Color.White,
-            ),
-            shape = RoundedCornerShape(10.dp),
+            shape = MaterialTheme.shapes.small,
         ) {
             if (isWorking) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(20.dp),
-                    color = androidx.compose.ui.graphics.Color.White,
                     strokeWidth = 2.dp,
                 )
             } else {
-                Text("验证并登录", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text("验证并登录", style = MaterialTheme.typography.titleSmall)
             }
         }
 
         Text(
             "Token 只保存在本机加密存储中，不会上传到任何第三方服务器。",
-            fontSize = 12.sp,
-            color = colors.subtle,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.outline,
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(8.dp))
@@ -214,22 +206,25 @@ fun LoginScreen() {
 
 @Composable
 private fun CardBlock(content: @Composable () -> Unit) {
-    val colors = AppTheme.colors
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(colors.surface)
-            .padding(14.dp),
-    ) { content() }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        tonalElevation = 1.dp,
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) { content() }
+    }
 }
 
 @Composable
 private fun TokenLink(text: String, onClick: () -> Unit) {
-    val colors = AppTheme.colors
     TextButton(onClick = onClick, contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
-        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, tint = colors.blue, modifier = Modifier.size(15.dp))
+        Icon(
+            Icons.AutoMirrored.Filled.OpenInNew,
+            contentDescription = null,
+            modifier = Modifier.size(15.dp),
+        )
         Spacer(Modifier.size(6.dp))
-        Text(text, fontSize = 13.sp, color = colors.blue)
+        Text(text, style = MaterialTheme.typography.bodyMedium)
     }
 }

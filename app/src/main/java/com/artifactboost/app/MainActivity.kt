@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
@@ -94,14 +95,13 @@ private fun ArtifactBoostRoot() {
 
 @Composable
 private fun SplashScreen() {
-    val colors = AppTheme.colors
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(colors.canvas),
+            .background(MaterialTheme.colorScheme.surface),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        CircularProgressIndicator(modifier = Modifier.size(28.dp), color = colors.blue, strokeWidth = 2.5.dp)
+        CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 2.5.dp)
     }
 }

@@ -35,9 +35,11 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
+import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -199,26 +201,28 @@ fun RepoDetailScreen(
     androidx.compose.runtime.LaunchedEffect(repo.fullName) { loadHeaderStats() }
 
     Scaffold(
-        containerColor = colors.canvas,
         topBar = {
             TopAppBar(
                 title = {
-                    Text(repo.name, fontWeight = FontWeight.Bold, fontSize = 16.sp, color = colors.strongText, maxLines = 1)
+                    Text(repo.name, style = MaterialTheme.typography.titleLarge, maxLines = 1)
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = colors.strongText)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
                 actions = {
                     IconButton(onClick = { uriHandler.openUri("https://github.com/${repo.fullName}") }) {
-                        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "在 GitHub 打开", tint = colors.muted)
+                        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "在 GitHub 打开")
                     }
                     IconButton(onClick = { scope.launch { load(tab, force = true) } }) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "刷新", tint = colors.muted)
+                        Icon(Icons.Filled.Refresh, contentDescription = "刷新")
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = colors.surface),
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                    scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+                ),
             )
         },
     ) { padding ->
@@ -248,8 +252,8 @@ fun RepoDetailScreen(
             item {
                 TabRow(
                     selectedTabIndex = tabIndex,
-                    containerColor = colors.surface,
-                    contentColor = colors.strongText,
+                    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                    contentColor = MaterialTheme.colorScheme.primary,
                 ) {
                     RepoTab.entries.forEachIndexed { index, entry ->
                         Tab(
@@ -262,19 +266,26 @@ fun RepoDetailScreen(
                                 ) {
                                     Text(
                                         entry.title,
-                                        fontSize = 14.sp,
-                                        fontWeight = if (tabIndex == index) FontWeight.SemiBold else FontWeight.Normal,
-                                        color = if (tabIndex == index) colors.strongText else colors.muted,
+                                        style = if (tabIndex == index) {
+                                            MaterialTheme.typography.titleSmall
+                                        } else {
+                                            MaterialTheme.typography.bodyMedium
+                                        },
+                                        color = if (tabIndex == index) {
+                                            MaterialTheme.colorScheme.onSurface
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
                                     )
                                     val badge = badgeFor(entry, runs, releases, branches)
                                     if (badge != null) {
                                         Text(
                                             badge,
-                                            fontSize = 10.sp,
-                                            color = colors.muted,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             modifier = Modifier
                                                 .clip(CircleShape)
-                                                .background(colors.border.copy(alpha = 0.6f))
+                                                .background(MaterialTheme.colorScheme.surfaceContainerHighest)
                                                 .padding(horizontal = 5.dp, vertical = 1.dp),
                                         )
                                     }
@@ -305,8 +316,17 @@ fun RepoDetailScreen(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(7.dp),
                                     ) {
-                                        Icon(Icons.Filled.Description, contentDescription = null, tint = colors.muted, modifier = Modifier.size(14.dp))
-                                        Text(readme!!.path, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = colors.muted)
+                                        Icon(
+                                            Icons.Filled.Description,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(14.dp),
+                                        )
+                                        Text(
+                                            readme!!.path,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
                                     }
                                     Hairline()
                                     MarkdownContent(markdown = readme!!.text, modifier = Modifier.padding(12.dp))
@@ -314,11 +334,11 @@ fun RepoDetailScreen(
                             }
                             readmeFailed -> CardSurface {
                                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Text("README 读取失败", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = colors.muted)
+                                    Text("README 读取失败", style = MaterialTheme.typography.titleSmall)
                                     Text(
                                         "跳过 README 直接看下面的构建 / 发行版 / 源码即可。",
-                                        fontSize = 12.sp,
-                                        color = colors.subtle,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                 }
                             }
@@ -394,10 +414,14 @@ fun RepoDetailScreen(
                     ) {
                         CardSurface {
                             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                Text("分支 / 标签", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = colors.strongText)
+                                Text("分支 / 标签", style = MaterialTheme.typography.titleSmall)
 
                                 if (branches.isEmpty()) {
-                                    Text("默认分支", fontSize = 13.sp, color = colors.subtle)
+                                    Text(
+                                        "默认分支",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
                                 } else {
                                     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                         branches.take(12).forEach { branch ->
@@ -405,30 +429,41 @@ fun RepoDetailScreen(
                                             Row(
                                                 modifier = Modifier
                                                     .fillMaxWidth()
-                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .clip(MaterialTheme.shapes.small)
                                                     .background(
-                                                        if (selected) colors.blue.copy(alpha = 0.12f) else colors.canvas,
+                                                        if (selected) {
+                                                            MaterialTheme.colorScheme.primaryContainer
+                                                        } else {
+                                                            MaterialTheme.colorScheme.surfaceContainerHighest
+                                                        },
                                                     )
                                                     .border(
                                                         1.dp,
-                                                        if (selected) colors.blue.copy(alpha = 0.4f) else colors.border,
-                                                        RoundedCornerShape(8.dp),
+                                                        if (selected) {
+                                                            MaterialTheme.colorScheme.primary
+                                                        } else {
+                                                            MaterialTheme.colorScheme.outlineVariant
+                                                        },
+                                                        MaterialTheme.shapes.small,
                                                     )
                                                     .padding(horizontal = 10.dp, vertical = 8.dp),
                                                 verticalAlignment = Alignment.CenterVertically,
                                             ) {
                                                 Text(
                                                     branch.name,
-                                                    fontSize = 13.sp,
-                                                    color = if (selected) colors.blue else colors.strongText,
-                                                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    color = if (selected) {
+                                                        MaterialTheme.colorScheme.onPrimaryContainer
+                                                    } else {
+                                                        MaterialTheme.colorScheme.onSurface
+                                                    },
                                                 )
                                                 Spacer(Modifier.weight(1f))
                                                 if (selected) {
                                                     Icon(
                                                         Icons.Filled.CheckCircle,
                                                         contentDescription = null,
-                                                        tint = colors.blue,
+                                                        tint = MaterialTheme.colorScheme.primary,
                                                         modifier = Modifier.size(14.dp),
                                                     )
                                                 }
@@ -441,7 +476,7 @@ fun RepoDetailScreen(
 
                         CardSurface {
                             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                                Text("源码压缩包", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = colors.strongText)
+                                Text("源码压缩包", style = MaterialTheme.typography.titleSmall)
                                 DownloadItemRow(item = sourceArchiveItem(repo, selectedRef, ArchiveFormat.ZIP))
                                 Hairline()
                                 DownloadItemRow(item = sourceArchiveItem(repo, selectedRef, ArchiveFormat.TARBALL))
@@ -450,8 +485,8 @@ fun RepoDetailScreen(
 
                         Text(
                             "源码包由 GitHub 现场打包，不支持 Range 分段，只能单连接下载（依然会走最快通道）。",
-                            fontSize = 11.sp,
-                            color = colors.subtle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline,
                         )
                     }
                 }
@@ -473,7 +508,7 @@ private fun badgeFor(
     RepoTab.SOURCE -> branches.size.takeIf { it > 0 }?.toString()
 }
 
-/** 仓库详情页顶部信息卡（对齐 GitHub 移动端 App 的 header） */
+/** 仓库详情页顶部信息卡：M3 表面容器 + M3 排版 */
 @Composable
 private fun RepoHeroHeader(
     repo: GHRepo,
@@ -481,12 +516,13 @@ private fun RepoHeroHeader(
     branchCount: Int?,
 ) {
     val colors = AppTheme.colors
+    val scheme = MaterialTheme.colorScheme
     val uriHandler = LocalUriHandler.current
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(colors.surface)
+            .background(scheme.surfaceContainerLow)
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(0.dp),
     ) {
@@ -496,13 +532,14 @@ private fun RepoHeroHeader(
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
                     text = buildAnnotatedString {
-                        withStyle(SpanStyle(color = colors.muted, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)) {
+                        withStyle(SpanStyle(color = scheme.onSurfaceVariant)) {
                             append("${repo.owner}/")
                         }
-                        withStyle(SpanStyle(color = colors.blue, fontSize = 18.sp, fontWeight = FontWeight.Bold)) {
+                        withStyle(SpanStyle(color = scheme.primary)) {
                             append(repo.name)
                         }
                     },
+                    style = MaterialTheme.typography.titleLarge,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -514,18 +551,21 @@ private fun RepoHeroHeader(
                     Icon(
                         if (repo.isPrivate) Icons.Filled.Lock else Icons.Filled.Public,
                         contentDescription = null,
-                        tint = if (repo.isPrivate) colors.yellow else colors.subtle,
+                        tint = if (repo.isPrivate) colors.yellow else scheme.onSurfaceVariant,
                         modifier = Modifier.size(11.dp),
                     )
                     Text(
                         if (repo.isPrivate) "私有仓库" else "公开仓库",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (repo.isPrivate) colors.yellow else colors.muted,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (repo.isPrivate) colors.yellow else scheme.onSurfaceVariant,
                     )
                     parseIso8601(repo.updatedAt)?.let { millis ->
-                        Text("·", fontSize = 11.sp, color = colors.subtle)
-                        Text(formatRelative(millis), fontSize = 11.sp, color = colors.subtle)
+                        Text("·", style = MaterialTheme.typography.labelSmall, color = scheme.outline)
+                        Text(
+                            formatRelative(millis),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = scheme.outline,
+                        )
                     }
                 }
             }
@@ -535,8 +575,8 @@ private fun RepoHeroHeader(
         if (!repo.description.isNullOrEmpty()) {
             Text(
                 repo.description,
-                fontSize = 14.sp,
-                color = colors.muted,
+                style = MaterialTheme.typography.bodyMedium,
+                color = scheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 12.dp),
             )
         }
@@ -572,82 +612,84 @@ private fun RepoHeroHeader(
             ) {
                 Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(15.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("在 GitHub 打开", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Text("在 GitHub 打开")
             }
             TextButton(onClick = { }, modifier = Modifier.weight(1f)) {
                 Icon(Icons.Filled.Share, contentDescription = null, modifier = Modifier.size(15.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("分享", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Text("分享")
             }
         }
     }
 }
 
-/** 单次运行的行内容（构建列表用） */
+/** 单次运行的行内容（构建列表用）：M3 排版 */
 @Composable
 fun RunRowContent(run: GHWorkflowRun, onClick: () -> Unit) {
     val colors = AppTheme.colors
+    val scheme = MaterialTheme.colorScheme
     val statusColor = runStatusColor(run, colors)
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
+            .clip(MaterialTheme.shapes.small)
             .clickable(onClick = onClick),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         IconBadge(runStatusIcon(run), statusColor)
-        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(3.dp), modifier = Modifier.weight(1f)) {
             Text(
                 run.displayTitle ?: run.name ?: "Workflow",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = colors.strongText,
+                style = MaterialTheme.typography.titleSmall,
                 maxLines = 2,
             )
             Text(
                 "${run.headBranch ?: "-"} · #${run.runNumber}",
-                fontSize = 11.sp,
-                color = colors.subtle,
+                style = MaterialTheme.typography.labelSmall,
+                color = scheme.outline,
             )
-            formatTimestamp(run.createdAt)?.let { Text(it, fontSize = 11.sp, color = colors.subtle) }
+            formatTimestamp(run.createdAt)?.let {
+                Text(it, style = MaterialTheme.typography.labelSmall, color = scheme.outline)
+            }
         }
-        Spacer(Modifier.weight(1f))
         StatusPill(runStatusText(run), statusColor)
     }
 }
 
-/** 单个 Release 的行内容 */
+/** 单个 Release 的行内容：M3 排版 */
 @Composable
 fun ReleaseRowContent(release: GHRelease, onClick: () -> Unit) {
     val colors = AppTheme.colors
+    val scheme = MaterialTheme.colorScheme
     val totalSize = release.assets.sumOf { it.size }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
+            .clip(MaterialTheme.shapes.small)
             .clickable(onClick = onClick),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         IconBadge(Icons.Filled.CheckCircle, colors.purple)
-        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            Text(release.displayName, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = colors.strongText, maxLines = 2)
+        Column(verticalArrangement = Arrangement.spacedBy(3.dp), modifier = Modifier.weight(1f)) {
+            Text(release.displayName, style = MaterialTheme.typography.titleSmall, maxLines = 2)
             if (release.assets.isNotEmpty()) {
                 Text(
                     "${release.tagName} · ${release.assets.size} 个附件 · ${formatBytes(totalSize)}",
-                    fontSize = 11.sp,
-                    color = colors.subtle,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = scheme.outline,
                 )
             } else {
-                Text(release.tagName, fontSize = 11.sp, color = colors.subtle)
+                Text(release.tagName, style = MaterialTheme.typography.labelSmall, color = scheme.outline)
             }
-            formatTimestamp(release.publishedAt)?.let { Text(it, fontSize = 11.sp, color = colors.subtle) }
+            formatTimestamp(release.publishedAt)?.let {
+                Text(it, style = MaterialTheme.typography.labelSmall, color = scheme.outline)
+            }
         }
-        Spacer(Modifier.weight(1f))
         when {
             release.prerelease -> StatusPill("预发布", colors.orange)
-            release.draft -> StatusPill("草稿", colors.subtle)
+            release.draft -> StatusPill("草稿", scheme.outline)
             else -> StatusPill("发行版", colors.green)
         }
     }

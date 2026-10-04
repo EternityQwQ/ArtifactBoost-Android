@@ -14,7 +14,6 @@ import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -28,7 +27,6 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalUriHandler
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -39,7 +37,6 @@ import com.artifactboost.app.ArtifactBoostApp
 import com.artifactboost.app.data.GHRelease
 import com.artifactboost.app.data.GHRepo
 import com.artifactboost.app.data.GHWorkflowRun
-import com.artifactboost.app.ui.theme.AppTheme
 
 private enum class RootTab(val label: String, val icon: ImageVector) {
     Repos("仓库", Icons.Filled.GridView),
@@ -54,7 +51,6 @@ private enum class RootTab(val label: String, val icon: ImageVector) {
  */
 @Composable
 fun RootScreen() {
-    val colors = AppTheme.colors
     val downloads = ArtifactBoostApp.instance.downloads
     val states by downloads.states.collectAsStateWithLifecycle()
 
@@ -74,9 +70,8 @@ fun RootScreen() {
     }
 
     Scaffold(
-        containerColor = colors.canvas,
         bottomBar = {
-            NavigationBar(containerColor = colors.surface) {
+            NavigationBar {
                 RootTab.entries.forEach { tab ->
                     NavigationBarItem(
                         // 长按「设置」触发原神彩蛋：只监听长按，短按仍走 onClick。
@@ -105,14 +100,7 @@ fun RootScreen() {
                                 Icon(tab.icon, contentDescription = tab.label)
                             }
                         },
-                        label = { Text(tab.label, fontSize = 11.sp) },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = colors.blue,
-                            selectedTextColor = colors.blue,
-                            unselectedIconColor = colors.muted,
-                            unselectedTextColor = colors.muted,
-                            indicatorColor = colors.blue.copy(alpha = 0.12f),
-                        ),
+                        label = { Text(tab.label) },
                     )
                 }
             }

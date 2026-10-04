@@ -70,6 +70,8 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
+    // XML 启动主题的 parent 需要它（Theme.Material3.* 系）；Compose UI 主题仍由 material3 负责
+    implementation("com.google.android.material:material:1.12.0")
 
     // 网络：OkHttp 负责 HTTP，kotlinx.serialization 负责 JSON
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

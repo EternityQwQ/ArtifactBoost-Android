@@ -11,13 +11,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.CallSplit
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -31,7 +31,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.artifactboost.app.data.GHRepo
 import com.artifactboost.app.ui.theme.AppTheme
@@ -40,13 +39,8 @@ import com.artifactboost.app.util.formatRelative
 import com.artifactboost.app.util.parseIso8601
 
 /**
- * 仓库图标：优先加载仓库所属 owner 的真实头像
- * （`https://github.com/{owner}.png`，GitHub 官方免鉴权端点），
- * 加载中/失败时退回「锁 / 书籍」占位图标。
- *
- * 为什么不用 API 里的 `avatar_url`：那需要额外发一次 `GET /users/{owner}`
- * 请求，占配额也拖慢列表；而 `github.com/{owner}.png` 是纯 CDN 图片，
- * 既快又不消耗 API 配额，还能被 Coil 的磁盘缓存命中。
+ * M3 仓库图标：tonal 占位 + 真实头像（`https://github.com/{owner}.png` 纯 CDN，不耗 API 配额），
+ * 形状走 M3 small，描边用 outlineVariant。
  */
 @Composable
 fun RepoAvatarView(
@@ -55,15 +49,16 @@ fun RepoAvatarView(
     owner: String? = null,
 ) {
     val colors = AppTheme.colors
-    val shape = RoundedCornerShape(size * 0.28f)
+    val scheme = MaterialTheme.colorScheme
+    val shape = MaterialTheme.shapes.small
     val avatarUrl = owner?.takeIf { it.isNotBlank() }?.let { "https://github.com/$it.png?size=200" }
 
     Box(
         modifier = Modifier
             .size(size)
             .clip(shape)
-            .background(colors.border.copy(alpha = 0.4f))
-            .border(0.5.dp, colors.border, shape),
+            .background(scheme.surfaceContainerHighest)
+            .border(0.5.dp, scheme.outlineVariant, shape),
         contentAlignment = Alignment.Center,
     ) {
         if (avatarUrl != null) {
@@ -83,7 +78,8 @@ fun RepoAvatarView(
                     .align(Alignment.BottomEnd)
                     .size(size * 0.44f)
                     .clip(CircleShape)
-                    .background(colors.surface),
+                    .background(scheme.surfaceContainerLowest)
+                    .border(0.5.dp, scheme.outlineVariant, CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
@@ -98,7 +94,7 @@ fun RepoAvatarView(
             Icon(
                 imageVector = Icons.AutoMirrored.Filled.MenuBook,
                 contentDescription = null,
-                tint = colors.muted,
+                tint = scheme.onSurfaceVariant,
                 modifier = Modifier.size(size * 0.45f),
             )
         }
@@ -106,8 +102,8 @@ fun RepoAvatarView(
 }
 
 /**
- * 仓库行：GitHub 移动端风格（owner/repo 双色标题 + 描述 + 语言/星标）。
- * 列表页和搜索页共用。
+ * M3 仓库行：owner/repo 双色标题 + 描述 + 语言/星标，排版走 M3 type scale。
+ * 列表页和搜索页共用，外层由 CardSurface 提供 M3 卡片容器。
  */
 @Composable
 fun RepoCardRow(
@@ -115,30 +111,31 @@ fun RepoCardRow(
     modifier: Modifier = Modifier,
 ) {
     val colors = AppTheme.colors
+    val scheme = MaterialTheme.colorScheme
     Row(
         modifier = modifier
             .fillMaxWidth()
             .padding(vertical = 3.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        RepoAvatarView(isPrivate = repo.isPrivate, size = 34.dp, owner = repo.owner)
+        RepoAvatarView(isPrivate = repo.isPrivate, size = 40.dp, owner = repo.owner)
 
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.weight(1f)) {
             Text(
                 text = buildAnnotatedString {
-                    withStyle(SpanStyle(color = colors.muted, fontSize = 14.sp)) {
+                    withStyle(SpanStyle(color = scheme.onSurfaceVariant)) {
                         append("${repo.owner}/")
                     }
                     withStyle(
                         SpanStyle(
-                            color = colors.blue,
-                            fontSize = 14.sp,
+                            color = scheme.primary,
                             fontWeight = FontWeight.SemiBold,
                         ),
                     ) {
                         append(repo.name)
                     }
                 },
+                style = MaterialTheme.typography.titleSmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -146,8 +143,8 @@ fun RepoCardRow(
             if (!repo.description.isNullOrEmpty()) {
                 Text(
                     text = repo.description,
-                    fontSize = 12.sp,
-                    color = colors.muted,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = scheme.onSurfaceVariant,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -166,10 +163,12 @@ fun RepoCardRow(
             }
 
             parseIso8601(repo.updatedAt)?.let { millis ->
-                Text("更新于 ${formatRelative(millis)}", fontSize = 11.sp, color = colors.subtle)
+                Text(
+                    "更新于 ${formatRelative(millis)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = scheme.outline,
+                )
             }
         }
-
-        Spacer(Modifier.weight(1f))
     }
 }
