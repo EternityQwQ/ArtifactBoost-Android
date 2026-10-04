@@ -125,10 +125,17 @@ internal data class Chunk(
     val length: Long get() = end - start + 1
 }
 
-/** 一个通道：一个独立的 OkHttpClient（独立连接池）+ 地址 + 实时吞吐 */
+/**
+ * 一个通道：一个独立的 OkHttpClient（独立连接池）+ 地址 + 实时吞吐。
+ *
+ * `endpoints` 不可变：`[0]` 是主地址，`last` 是兜底（直连）。
+ * 旧的 `endpoints = drop(1)+first` 会全局变异共享对象，
+ * 并发重试时 A 切到直连、B 又切回去，兜底形同虚设。
+ * 现在重试只用局部下标选地址，不再变异共享状态。
+ */
 private class RouteChannel(
     val client: OkHttpClient,
-    var endpoints: List<String>,
+    val endpoints: List<String>,
     val speedHint: Double,
     /** 展示名（直连 / gh-proxy.com / …），用于诊断面板 */
     val name: String,
@@ -136,6 +143,9 @@ private class RouteChannel(
     @Volatile var measuredSpeed: Double = speedHint
     /** 是否本通道处于「被限流降额」状态 */
     @Volatile var throttled: Boolean = false
+
+    val primary: String get() = endpoints.first()
+    val fallback: String get() = endpoints.last()
 }
 
 /**
@@ -431,7 +441,8 @@ class DownloadEngine {
             val output = RandomAccessFile(outFile, "rw")
             output.setLength(total)
 
-            val pool = SlicePool(total)
+            // 预切分 lanes*4：首轮就能派满并发，避免“池子只有 1 个区间→只能派出 1 条”的调度饿死（与 iOS 同步）。
+            val pool = SlicePool(total, lanes * 4)
             val written = AtomicLong(0)
             val startedAt = System.nanoTime()
 
@@ -496,7 +507,7 @@ class DownloadEngine {
                                 LaneSnapshot(
                                     laneId = laneId,
                                     routeName = channel.name,
-                                    url = channel.endpoints.first(),
+                                    url = channel.primary,
                                     start = work.start,
                                     end = work.end,
                                     downloaded = 0,
@@ -507,10 +518,12 @@ class DownloadEngine {
                                 ),
                             )
 
+                            val capturedChannels = channels.toList()
                             jobs += launch(Dispatchers.IO) {
                                 runSlice(
                                     laneId = laneId,
                                     channel = channel,
+                                    channels = capturedChannels,
                                     initial = work,
                                     pool = pool,
                                     lanes = lanes,
@@ -912,6 +925,7 @@ private fun delayFor(pool: SlicePool, live: Int, lanes: Int, startedAt: Long): L
 private suspend fun runSlice(
     laneId: Int,
     channel: RouteChannel,
+    channels: List<RouteChannel>,
     initial: Chunk,
     pool: SlicePool,
     lanes: Int,
@@ -953,7 +967,7 @@ private suspend fun runSlice(
             LaneSnapshot(
                 laneId = laneId,
                 routeName = channel.name,
-                url = channel.endpoints.first(),
+                url = channel.primary,
                 start = from,
                 end = to,
                 downloaded = 0,
@@ -963,30 +977,37 @@ private suspend fun runSlice(
                 lastStatus = 206,
             ),
         )
-        board.activeUrl = channel.endpoints.first()
+        board.activeUrl = channel.primary
 
-        val sliceStartedAt = System.nanoTime()
-        val outcome = try {
-            fetchSlice(
+        val outcome: SliceOutcome
+        val winner: RouteChannel
+        val finalUrl: String
+        try {
+            val result = fetchSlice(
                 chunk = Chunk(0, from, to),
                 pool = pool,
                 inflight = inflight,
                 board = board,
                 laneId = laneId,
                 channel = channel,
+                channels = channels,
             )
+            outcome = result.first
+            winner = result.second
+            finalUrl = result.third
         } catch (e: CancellationException) {
             throw e
         } catch (e: DownloadException.Cancelled) {
             board.remove(laneId)
             return
         } catch (e: Exception) {
-            // 这一片彻底失败（重试耗尽）：在面板上标红，然后交给上层判断
+            // 这一片重试耗尽（已跨通道试过）：还回池子让别的 worker 换线重取，
+            // 只有失败预算耗尽才掀桌，避免单线路抖一下就重下几百 MB。
             board.update(
                 LaneSnapshot(
                     laneId = laneId,
                     routeName = channel.name,
-                    url = channel.endpoints.first(),
+                    url = channel.primary,
                     start = from,
                     end = to,
                     downloaded = 0,
@@ -998,7 +1019,10 @@ private suspend fun runSlice(
             )
             // 失败的那一段必须还回池子，否则文件会缺一块
             if (current.length > 0) pool.putBack(Chunk(0, from, current.end))
-            throw e
+            if (pool.failures.get() > maxSliceFailures(lanes)) throw e
+            // 预算内：继续回池子要下一片（很可能换一条线重下刚失败的那块）
+            current = nextWork(pool, 1, lanes, total) ?: return
+            continue
         }
 
         if (outcome.received > 0) {
@@ -1006,16 +1030,16 @@ private suspend fun runSlice(
             written.addAndGet(outcome.received.toLong())
             pool.recordDone(outcome.received.toLong())
             accumulator.advance(outcome.received.toLong())
-            channel.observe(outcome.elapsedNanos, outcome.received.toLong())
+            winner.observe(outcome.elapsedNanos, outcome.received.toLong())
             board.doneSlices.incrementAndGet()
-            board.reward(channel.name)
+            board.reward(winner.name)
 
             val seconds = maxOf(outcome.elapsedNanos / 1_000_000_000.0, 0.001)
             board.update(
                 LaneSnapshot(
                     laneId = laneId,
-                    routeName = channel.name,
-                    url = channel.endpoints.first(),
+                    routeName = winner.name,
+                    url = finalUrl,
                     start = from,
                     end = to,
                     downloaded = outcome.received.toLong(),
@@ -1055,6 +1079,13 @@ private data class SliceOutcome(
  * Azure 单 Blob 有「约 60 MiB/s 或 500 请求/秒」的目标，超了就是 503 ServerBusy，
  * 官方建议用指数退避而不是硬顶，否则会被越限越死。
  *
+ * 多线路重试语义（本次修复的核心，与 iOS 同步）：
+ *  - attempt 0 用初始通道主地址；
+ *  - attempt 1 起重新加权选通道（避开刚失败的那条），试另一条线的 primary；
+ *  - 最后一次强制走直连兜底。
+ * 全程只用局部变量选地址，不再变异共享 `RouteChannel`，并发重试互不踩。
+ * 返回成功时的实际通道，调用方按它做 `observe/reward`，限流标记不张冠李戴。
+ *
  * 取消语义：请求登记到 [CallRegistry]，`cancel()` 会把它掐掉；
  * 阻塞读取放在 [withContext] 里，配合 `ensureActive()` 做到「点了就停」。
  * 退避也换成 `delay()`，这样取消能立刻打断等待，而不是睡满再检查。
@@ -1066,16 +1097,38 @@ private suspend fun fetchSlice(
     board: LaneBoard,
     laneId: Int,
     channel: RouteChannel,
-): SliceOutcome {
+    channels: List<RouteChannel>,
+): Triple<SliceOutcome, RouteChannel, String> {
     var lastError: Exception = DownloadException.BadResponse
     var attempt = 0
+    val direct = channels.firstOrNull { it.name == com.artifactboost.app.data.DownloadRoute.DIRECT.name }
 
     while (attempt < DownloadEngine.MAX_ATTEMPTS) {
         // 每轮重试前先看有没有被取消
         currentCoroutineContext().ensureActive()
         if (DownloadEngineFlag.cancelled) throw DownloadException.Cancelled
 
-        val url = channel.endpoints.first()
+        // 选本轮实际通道：首轮用初始，后续换线，最后兜底直连
+        val active: RouteChannel
+        val url: String
+        if (attempt == 0 || channels.size <= 1) {
+            active = channel
+            url = active.primary
+        } else if (attempt >= DownloadEngine.MAX_ATTEMPTS - 1) {
+            if (direct != null) {
+                active = direct
+                url = direct.primary
+            } else {
+                // plan 里没有直连：用该通道自带的兜底（即直连 URL）
+                active = channels[pickRetryChannel(channels, channel.name)]
+                url = active.fallback
+            }
+        } else {
+            active = channels[pickRetryChannel(channels, channel.name)]
+            url = active.primary
+        }
+        // 兜底地址即直连：成功不清除镜像的限流标记，归因清晰。
+        val isFallbackUrl = url != active.primary
         val request = Request.Builder()
             .url(url)
             .header("Range", "bytes=${chunk.start}-${chunk.end}")
@@ -1086,7 +1139,7 @@ private suspend fun fetchSlice(
         try {
             // 阻塞 IO 放到 IO 线程池；Call 登记后 cancel() 能立刻打断它
             val data = withContext(Dispatchers.IO) {
-                val call = channel.client.newCall(request)
+                val call = active.client.newCall(request)
                 inflight.register(call)
                 try {
                     call.execute().use { response ->
@@ -1097,8 +1150,8 @@ private suspend fun fetchSlice(
                                 board.throttles.incrementAndGet()
                                 // 通道级降额：不是简单降权重，而是直接把它判为「被限流」，
                                 // 调度器下一轮就会削它的并发，避免越限越死。
-                                channel.throttled = true
-                                board.penalize(channel.name)
+                                active.throttled = true
+                                board.penalize(active.name)
                                 throw DownloadException.Throttled(
                                     response.code,
                                     DownloadEngine.retryAfter(response.headers),
@@ -1106,7 +1159,8 @@ private suspend fun fetchSlice(
                             }
                             else -> throw DownloadException.BadResponse
                         }
-                        channel.throttled = false
+                        // 兜底（直连）成功不代表镜像恢复，不清除镜像限流标记
+                        if (!isFallbackUrl) active.throttled = false
                         val body = response.body ?: throw DownloadException.BadResponse
                         val buffer = ByteArray(chunk.length.toInt())
                         var received = 0
@@ -1124,7 +1178,7 @@ private suspend fun fetchSlice(
                     inflight.release(call)
                 }
             }
-            return SliceOutcome(data.first, data.second, System.nanoTime() - startedAt)
+            return Triple(SliceOutcome(data.first, data.second, System.nanoTime() - startedAt), active, url)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -1139,19 +1193,15 @@ private suspend fun fetchSlice(
 
             if (e is DownloadException.Throttled) {
                 // 被限流：把这条通道的权重降下来，让活儿分给别人
-                channel.measuredSpeed = maxOf(channel.measuredSpeed * 0.5, 1.0)
-            }
-            if (attempt >= 2 && channel.endpoints.size > 1) {
-                // 通道彻底不通了就轮到备用地址
-                channel.endpoints = channel.endpoints.drop(1) + channel.endpoints.first()
+                active.measuredSpeed = maxOf(active.measuredSpeed * 0.5, 1.0)
             }
 
             // 重试状态同步到面板：用户能看到「车道 #3 正在第 2 次重试 / 上一次 503」
             board.update(
                 LaneSnapshot(
                     laneId = laneId,
-                    routeName = channel.name,
-                    url = channel.endpoints.first(),
+                    routeName = active.name,
+                    url = url,
                     start = chunk.start,
                     end = chunk.end,
                     downloaded = 0,
@@ -1178,21 +1228,63 @@ private fun writeAt(output: RandomAccessFile, offset: Long, data: ByteArray, len
     }
 }
 
-/** 按实时吞吐挑通道：快的多干活 */
+/**
+ * 按实时吞吐加权挑通道：快的多干活，慢的也有活（带宽叠加，与 iOS 同步）。
+ *
+ * 老实现是贪心取最快，导致所有 lane 挤在同一条通道/同一连接池，
+ * 既打爆单镜像（429/503）又浪费其它通道带宽。
+ */
 private fun pickChannel(channels: List<RouteChannel>, hint: Int): Int {
     if (channels.size == 1) return 0
-    var best = hint % channels.size
-    var bestSpeed = -1.0
-    for (offset in channels.indices) {
-        val index = (hint + offset) % channels.size
-        val speed = channels[index].measuredSpeed
-        if (speed > bestSpeed) {
-            bestSpeed = speed
-            best = index
-        }
+    var total = 0.0
+    val weights = DoubleArray(channels.size)
+    for ((i, ch) in channels.withIndex()) {
+        var w = maxOf(ch.measuredSpeed, 1.0)
+        // 被限流的通道降权 90%，而不是直接剔除（保底不断流）
+        if (ch.throttled) w *= 0.1
+        weights[i] = w
+        total += w
     }
-    return best
+    if (total <= 0) return hint % channels.size
+    var r = Math.random() * total
+    for (i in weights.indices) {
+        r -= weights[i]
+        if (r <= 0) return i
+    }
+    return weights.indices.maxByOrNull { weights[it] } ?: 0
 }
+
+/**
+ * 重试选路：加权随机，但排除刚失败的那条线。
+ * 排除是为了“首失败即换线”：一直加权随机仍可能连抽同一条坏线，
+ * 白白浪费 `MAX_ATTEMPTS` 里宝贵的第二次机会。
+ */
+private fun pickRetryChannel(channels: List<RouteChannel>, excluding: String): Int {
+    if (channels.size == 1) return 0
+    var total = 0.0
+    val weights = DoubleArray(channels.size)
+    for ((i, ch) in channels.withIndex()) {
+        if (ch.name == excluding) {
+            weights[i] = 0.0
+            continue
+        }
+        var w = maxOf(ch.measuredSpeed, 1.0)
+        if (ch.throttled) w *= 0.1
+        weights[i] = w
+        total += w
+    }
+    // 被排除后无可用（同名通道占满）：退回普通加权
+    if (total <= 0) return pickChannel(channels, (Math.random() * channels.size).toInt())
+    var r = Math.random() * total
+    for (i in weights.indices) {
+        r -= weights[i]
+        if (r <= 0) return i
+    }
+    return weights.indices.maxByOrNull { weights[it] } ?: 0
+}
+
+/** 单片耗尽重试（已跨通道）后不立刻掀桌，攒够这么多才判死（与 iOS 同步）。 */
+internal fun maxSliceFailures(lanes: Int): Int = maxOf(20, lanes * 2)
 
 /** 用一小片实测吞吐更新通道速度（滑动平均，避免抖动） */
 private fun RouteChannel.observe(elapsedNanos: Long, bytes: Long) {
@@ -1214,7 +1306,7 @@ internal object DownloadEngineFlag {
  * 于是「把一段砍成两半」不需要给任何 worker 重新编号，
  * 写盘也能按偏移随意定位。这正是「随时切分、随时抢活」的前提。
  */
-internal class SlicePool(val total: Long) {
+internal class SlicePool(val total: Long, slices: Int = 1) {
 
     private val queue = ConcurrentLinkedDeque<Chunk>()
 
@@ -1237,7 +1329,27 @@ internal class SlicePool(val total: Long) {
     }
 
     init {
-        queue.add(Chunk(0, 0L, total - 1))
+        // 预切分：首轮就能派满 lanes 条连接，避免单区间导致的调度饿死（与 iOS 同步）。
+        // 按 lanes*4 均分，尾块吃余数；块太小（<64KB）时自动收敛，避免任务爆炸。
+        // 默认 slices=1 保持旧单测兼容。
+        val target = maxOf(1, slices)
+        if (target <= 1 || total <= 0) {
+            queue.add(Chunk(0, 0L, total - 1))
+        } else {
+            val maxSlices = maxOf(1, (total / (64 * 1024)).toInt())
+            val count = maxOf(1, minOf(target, maxSlices))
+            if (count <= 1) {
+                queue.add(Chunk(0, 0L, total - 1))
+            } else {
+                val base = total / count
+                var start = 0L
+                for (i in 0 until count) {
+                    val end = if (i == count - 1) total - 1 else start + base - 1
+                    queue.add(Chunk(0, start, end))
+                    start = end + 1
+                }
+            }
+        }
     }
 
     /** 取一段活儿；没有就返回 null，由调度循环决定要不要切分 */
