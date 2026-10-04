@@ -2,6 +2,8 @@ package com.artifactboost.app.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,6 +35,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -49,12 +54,14 @@ import com.artifactboost.app.ui.theme.AppTheme
  * 我的仓库：支持本地筛选 + 下拉刷新。
  * 对应 iOS 版的 RepoListView。
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun RepoListScreen(onOpenRepo: (GHRepo) -> Unit = {}) {
     val colors = AppTheme.colors
     val session = ArtifactBoostApp.instance.session
     val viewModel = repoListViewModel(session)
+    val uriHandler = LocalUriHandler.current
+    val haptics = LocalHapticFeedback.current
 
     val repos by viewModel.repos.collectAsStateWithLifecycle()
     val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
@@ -62,6 +69,8 @@ fun RepoListScreen(onOpenRepo: (GHRepo) -> Unit = {}) {
     val errorMessage by viewModel.errorMessage.collectAsStateWithLifecycle()
 
     var filter by remember { mutableStateOf("") }
+    // 绝区零彩蛋：长按顶部「我的仓库」标题触发，二次确认后才跳官网，不做后台静默下载
+    var showZzzEgg by remember { mutableStateOf(false) }
 
     val shown = remember(repos, filter) {
         if (filter.isBlank()) repos
@@ -72,7 +81,22 @@ fun RepoListScreen(onOpenRepo: (GHRepo) -> Unit = {}) {
         containerColor = colors.canvas,
         topBar = {
             TopAppBar(
-                title = { Text("我的仓库", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = colors.strongText) },
+                title = {
+                    Text(
+                        "我的仓库",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 18.sp,
+                        color = colors.strongText,
+                        modifier = Modifier.combinedClickable(
+                            onClick = {},
+                            onLongClick = {
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                showZzzEgg = true
+                            },
+                            onLongClickLabel = "发现彩蛋",
+                        ),
+                    )
+                },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = colors.surface),
             )
         },
@@ -153,5 +177,12 @@ fun RepoListScreen(onOpenRepo: (GHRepo) -> Unit = {}) {
                 }
             }
         }
+    }
+
+    if (showZzzEgg) {
+        ZzzEasterEggDialog(
+            onDismiss = { showZzzEgg = false },
+            onOpenOfficialSite = { uriHandler.openUri(ZZZ_CN_URL) },
+        )
     }
 }
