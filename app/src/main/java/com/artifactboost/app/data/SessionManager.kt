@@ -96,7 +96,31 @@ class SessionManager(private val appContext: Context) {
             logout()
             return "登录已失效（401），请重新输入 Token"
         }
+        networkHint(error)?.let { return it }
         return error.message ?: "未知错误"
+    }
+
+    /**
+     * 网络层错误的中文映射：超时/DNS/建连失败透出的都是英文原文，
+     * 顺着 cause 链找，命中就给一句人话。解析阶段永远直连 api.github.com，
+     * 所以这里点名，免得用户去折腾通道设置。
+     */
+    private fun networkHint(error: Throwable): String? {
+        var cause: Throwable? = error
+        while (cause != null) {
+            when (cause) {
+                is java.net.SocketTimeoutException ->
+                    return "连接 GitHub 超时，请检查网络后重试（解析下载地址时永远直连 api.github.com，换通道也救不了这一段）"
+                is java.net.UnknownHostException ->
+                    return "无法解析 GitHub 域名，请检查网络 / DNS 后重试"
+                is java.net.ConnectException ->
+                    return "连不上 GitHub，请检查网络或代理后重试"
+            }
+            val next = cause.cause
+            if (next == null || next === cause) break
+            cause = next
+        }
+        return null
     }
 
     private companion object {
