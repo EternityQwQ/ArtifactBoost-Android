@@ -16,12 +16,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import kotlin.coroutines.coroutineContext
 
 /** 测速用的真实目标（优先产物，其次构建日志） */
 data class SpeedTestTarget(
@@ -160,6 +163,15 @@ class DownloadManager(
      */
     private companion object {
         const val FIND_TARGET_TIMEOUT_MS = 20_000L
+
+        /**
+         * 解析签名地址单次限时：该阶段永远直连 api.github.com，
+         * OkHttp 侧已有 30s callTimeout，这里是防线程池排队等意外情况的第二道保险。
+         */
+        const val RESOLVE_TIMEOUT_MS = 30_000L
+
+        /** 解析重试前退避：抖动网络下立刻重打大概率再撞上，歇 1.5s 再试更划算 */
+        const val RESOLVE_RETRY_DELAY_MS = 1_500L
     }
 
     private suspend fun findTestTargetUnsafe(): SpeedTestTarget? {
@@ -213,6 +225,9 @@ class DownloadManager(
     /**
      * 解析签名地址 → 选通道 → 下载。
      * 签名地址有时效，整体失败后重新解析再试一次。
+     *
+     * 解析阶段永远直连 api.github.com（通道只影响下载阶段），弱网下单次可达 30s；
+     * 这里做了三件事避免“一直转”：单次 30s 限时、重试前退避 1.5s、重试时刷出明确文案。
      */
     private suspend fun performDownload(
         item: DownloadItem,
@@ -223,7 +238,24 @@ class DownloadManager(
         var lastError: Throwable = DownloadException.BadResponse
         for (attempt in 0 until 2) {
             try {
-                val signed = client.resolveDownloadUrl(item.source)
+                if (attempt > 0) {
+                    // 让用户看出来是在重试，而不是卡死；文案见 DownloadItemRow 的 Resolving 分支
+                    setRouteSummary(item.id, "正在解析下载地址（重试 $attempt/1）…")
+                    delay(RESOLVE_RETRY_DELAY_MS)
+                }
+                val signed = withTimeoutOrNull(RESOLVE_TIMEOUT_MS) {
+                    client.resolveDownloadUrl(item.source)
+                }
+                if (signed == null) {
+                    // withTimeoutOrNull 在协程被取消时同样返回 null：先把取消抛出去，
+                    // 否则会被包装成“超时”再白跑一次重试。
+                    coroutineContext.ensureActive()
+                    throw java.net.SocketTimeoutException(
+                        "解析下载地址超时（30s）：直连 api.github.com 太慢，请检查网络后重试",
+                    )
+                }
+                // 解析成功：清掉可能存在的“重试…”文案，后面测速/下载会刷自己的说明
+                _routeSummary.value = _routeSummary.value - item.id
                 return runDownload(item, engine, signed, settings)
             } catch (e: Exception) {
                 if (!shouldRetry(e)) throw e

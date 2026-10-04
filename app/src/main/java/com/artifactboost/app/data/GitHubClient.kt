@@ -58,6 +58,9 @@ class GitHubClient(val token: String) {
     private val apiClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
+        // 单次调用总封顶：readTimeout 按每次 read 空闲计时，慢速 trickle 下能拖很久，
+        // callTimeout 保证一次请求最多 45s 必返回（成功/超时），不再无限挂起。
+        .callTimeout(45, TimeUnit.SECONDS)
         .build()
 
     /**
@@ -69,6 +72,9 @@ class GitHubClient(val token: String) {
         .followSslRedirects(false)
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
+        // 解析阶段永远直连 api.github.com，国内抖动大，单次 30s 封顶，
+        // 配合 performDownload 的限时+重试，最多约 60s 必有结果（成功/中文报错）。
+        .callTimeout(30, TimeUnit.SECONDS)
         .build()
 
     // MARK: - 请求构造
@@ -163,6 +169,10 @@ class GitHubClient(val token: String) {
     suspend fun workflowRuns(repo: GHRepo): List<GHWorkflowRun> =
         get<RunsResponse>("repos/${repo.fullName}/actions/runs", mapOf("per_page" to "30"))
             .workflowRuns
+
+    /** 取单次 workflow 运行（「直接打开 Actions 链接」用） */
+    suspend fun workflowRun(fullName: String, runId: Long): GHWorkflowRun =
+        get("repos/$fullName/actions/runs/$runId")
 
     /** 某次运行产生的产物列表 */
     suspend fun artifacts(repo: GHRepo, run: GHWorkflowRun): List<GHArtifact> =

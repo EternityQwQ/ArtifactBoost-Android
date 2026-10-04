@@ -131,8 +131,12 @@ fun LoginScreen() {
                     placeholder = { Text("粘贴 Token（ghp_… 或 github_pat_…）", fontSize = 13.sp) },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
+                    // 注意：不要用 KeyboardType.Password，它在部分国产 ROM 上会强制弹出
+                    // 系统安全键盘（禁粘贴/禁第三方输入法），Token 需要粘贴所以用普通文本键盘。
+                    // 显示遮挡由上面的 PasswordVisualTransformation 负责，与键盘类型无关。
                     keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Password,
+                        keyboardType = KeyboardType.Text,
+                        autoCorrect = false,
                         imeAction = ImeAction.Done,
                     ),
                     shape = RoundedCornerShape(10.dp),
