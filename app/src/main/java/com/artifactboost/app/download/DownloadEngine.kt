@@ -109,6 +109,9 @@ sealed class DownloadException(message: String) : IOException(message) {
     /** 服务器忽略 Range 头（回 200 全量）：这条地址不能用于分段下载 */
     object NoRange : DownloadException("下载失败：该通道不支持分段下载")
 
+    /** 磁盘空间不够：重试没有意义，直接失败提示用户清理 */
+    object NoSpace : DownloadException("下载失败：存储空间不足，请清理后重试")
+
     /** 服务器明确要求我们慢一点（429 / 503 等），需要按 Retry-After 退避 */
     class Throttled(val code: Int, val retryAfterMillis: Long?) :
         DownloadException("下载失败：服务器限流（$code）")
@@ -324,9 +327,14 @@ class DownloadEngine {
         if (!tempDir.exists() && !tempDir.mkdirs()) throw DownloadException.BadResponse
         outputDir.mkdirs()
 
-        var outFile = File(outputDir, fileName)
-        if (outFile.exists()) {
-            outFile = File(outputDir, "${System.currentTimeMillis().toString().takeLast(6)}-$fileName")
+        // 小文件 / 未知体积走单连接（不续传）：存在则加时间戳避让
+        fun uniqueOut(): File {
+            val base = File(outputDir, fileName)
+            return if (!base.exists()) {
+                base
+            } else {
+                File(outputDir, "${System.currentTimeMillis().toString().takeLast(6)}-$fileName")
+            }
         }
 
         try {
@@ -338,21 +346,37 @@ class DownloadEngine {
             if (total == null || total <= 0) {
                 // 探测不到体积（不少接口不回 Content-Length）：
                 // 先单连接跑，只要响应是 206 就现场升级成多线程分段
-                val single = downloadSingle(urls.first(), outFile, lanes, progress)
+                val single = downloadSingle(urls.first(), uniqueOut(), lanes, progress)
                 val elapsed = maxOf((System.nanoTime() - startedAt) / 1_000_000_000.0, 0.05)
                 return@withContext DownloadResult(single.file, single.bytes / elapsed, single.lanes)
             }
 
             if (!probe.chunked || total < MIN_CHUNKED_TOTAL) {
                 // 服务器忽略了 Range（返回 200 全量），或者文件太小不值得分段
-                val single = downloadSingle(urls.first(), outFile, lanes, progress)
+                val single = downloadSingle(urls.first(), uniqueOut(), lanes, progress)
                 val elapsed = maxOf((System.nanoTime() - startedAt) / 1_000_000_000.0, 0.05)
                 return@withContext DownloadResult(single.file, single.bytes / elapsed, single.lanes)
             }
 
-            val result = segmentDownload(urls, total, outFile, tempDir, lanes, plan, progress)
+            // 大文件分段路径：固定 part 文件名 + sidecar 账本，支持断点续传。
+            // 同一 fileName 重下即自发现续传（签名地址有时效，total 一致才认；
+            // 预检与续传加载都在 segmentDownload 内部）。
+            val partFile = File(outputDir, "$fileName.part")
+            val sidecarFile = File(outputDir, "$fileName.part.ranges")
+
+            val part = segmentDownload(
+                urls, total, partFile, sidecarFile, tempDir, lanes, plan, progress,
+            )
+            sidecarFile.delete()
+            // 落到最终名：已存在则加时间戳避让（与旧行为一致）
+            var final = File(outputDir, fileName)
+            if (final.exists()) {
+                final = File(outputDir, "${System.currentTimeMillis().toString().takeLast(6)}-$fileName")
+            }
+            // rename 同目录一般必成；失败则直接用 part 兜底（数据本身是完整的）
+            if (!part.renameTo(final)) final = part
             val elapsed = maxOf((System.nanoTime() - startedAt) / 1_000_000_000.0, 0.05)
-            DownloadResult(result, total / elapsed, lanes)
+            DownloadResult(final, total / elapsed, lanes)
         } finally {
             tempDir.deleteRecursively()
         }
@@ -373,7 +397,8 @@ class DownloadEngine {
     private suspend fun segmentDownload(
         urls: List<String>,
         total: Long,
-        outFile: File,
+        partFile: File,
+        sidecarFile: File,
         tempDir: File,
         lanes: Int,
         plan: List<ScoredRoute>,
@@ -384,7 +409,14 @@ class DownloadEngine {
         val board = LaneBoard(lanes)
         // 通道列表在下面才建好，这里先用空引用占位，建好后立刻回填。
         var channelsRef: List<RouteChannel> = emptyList()
-        val accumulator = ProgressAccumulator(total, progress) {
+        // 续传自发现：part+账本都在且 total 一致才认，否则删掉从头下
+        val resumeRanges = ResumeTracker.loadResumeRanges(sidecarFile, partFile, total)
+        // 磁盘预检：只看还缺的字节，不够直接失败（重试无意义）
+        val seedBytes = resumeRanges.sumOf { it.length }
+        if ((partFile.parentFile?.usableSpace ?: 0L) < total - seedBytes) {
+            throw DownloadException.NoSpace
+        }
+        val accumulator = ProgressAccumulator(total, progress, seedBytes) {
             // 诊断快照走的是「现取」而不是「定时轮询」：只有真要推进度的那一拍才组数据，
             // 零额外开销。routes() 里带上各通道实测速度与是否在跑。
             val active = board.lanesSnapshot().map { it.routeName }.toSet()
@@ -450,12 +482,23 @@ class DownloadEngine {
             }
             channelsRef = channels
 
-            val output = RandomAccessFile(outFile, "rw")
-            output.setLength(total)
+            val output = RandomAccessFile(partFile, "rw")
+            try {
+                // 续传命中时长度已是 total，直接保留数据；否则预分配
+                if (partFile.length() != total) output.setLength(total)
+            } catch (e: IOException) {
+                runCatching { output.close() }
+                if (e is DownloadException.NoSpace) throw e
+                throw DownloadException.NoSpace
+            }
 
             // 预切分 lanes*4：首轮就能派满并发，避免“池子只有 1 个区间→只能派出 1 条”的调度饿死（与 iOS 同步）。
             val pool = SlicePool(total, lanes * 4)
-            val written = AtomicLong(0)
+            // 续传挖除：pool / written / tracker 三者同源，缺一就会进度脱节
+            val excludedBytes = pool.excludeDone(resumeRanges)
+            val tracker = ResumeTracker(sidecarFile, total)
+            tracker.seed(resumeRanges)
+            val written = AtomicLong(excludedBytes)
             val startedAt = System.nanoTime()
 
             // 车道编号只增不减：worker 收工后编号不复用，
@@ -566,6 +609,7 @@ class DownloadEngine {
                                     accumulator = accumulator,
                                     inflight = inflight,
                                     board = board,
+                                    tracker = tracker,
                                 )
                                 board.remove(laneId)
                             }
@@ -584,12 +628,14 @@ class DownloadEngine {
 
                 if (written.get() != total) throw DownloadException.Incomplete
                 runCatching { output.fd.sync() }
+                // 成功即删账本：失败/取消走 finally 只关文件，part+账本留给下次续传
+                tracker.delete()
             } finally {
                 runCatching { output.close() }
             }
 
             accumulator.finish(total)
-            return outFile
+            return partFile
         } finally {
             enginePool.close()
             synchronized(clients) { clients.removeAll(sessionClients) }
@@ -647,20 +693,26 @@ class DownloadEngine {
             if (ranged) {
                 val total = probeSize(listOf(url))?.total
                 if (total != null && total >= MIN_CHUNKED_TOTAL) {
-                    // 升级：交给分段引擎跑，用独立临时目录避免和外层冲突
+                    // 升级：交给分段引擎跑，用独立临时目录避免和外层冲突。
+                    // 同样走 part+账本（以 outFile 派生），升级路径不断点续传不断流。
                     val upgradeDir = File(outFile.parentFile ?: outFile.absoluteFile.parentFile, "u-${System.nanoTime()}")
                     upgradeDir.mkdirs()
                     try {
-                        val file = segmentDownload(
+                        val dir = outFile.parentFile ?: outFile.absoluteFile.parentFile
+                        val part = segmentDownload(
                             urls = listOf(url),
                             total = total,
-                            outFile = outFile,
+                            partFile = File(dir, "${outFile.name}.part"),
+                            sidecarFile = File(dir, "${outFile.name}.part.ranges"),
                             tempDir = upgradeDir,
                             lanes = lanes,
                             plan = listOf(ScoredRoute(com.artifactboost.app.data.DownloadRoute.DIRECT, 1.0)),
                             progress = progress,
                         )
-                        return SingleOutcome(file, total, lanes)
+                        File(dir, "${outFile.name}.part.ranges").delete()
+                        // outFile 已是避让后的唯一名，rename 必成；失败则用 part 兜底
+                        val final = if (part.renameTo(outFile)) outFile else part
+                        return SingleOutcome(final, total, lanes)
                     } finally {
                         upgradeDir.deleteRecursively()
                     }
@@ -912,6 +964,17 @@ internal const val MIN_SLICE_TARGET = 64 * 1024
 internal const val MAX_SLICE_TARGET = 4 * 1024 * 1024
 
 /**
+ * 大文件自适应分片上限：文件越大单片越大，用更少的请求数跑完，
+ * QPS 降下来才不会撞上 Azure/Cloudflare 的 429/503 线。
+ * 流式落盘后大片不再占内存（每片只用 64KB 读缓冲），放量是安全的。
+ */
+internal fun maxSliceFor(total: Long): Int = when {
+    total >= 2L * 1024 * 1024 * 1024 -> 16 * 1024 * 1024
+    total >= 1L * 1024 * 1024 * 1024 -> 8 * 1024 * 1024
+    else -> MAX_SLICE_TARGET
+}
+
+/**
  * 分配下一段活儿：优先拿现成的；拿不到而连接还闲着，就从末尾切一刀。
  * 这一步是「分片续做」的入口，也是收尾阶段还能保持满速的原因。
  *
@@ -932,7 +995,7 @@ internal fun nextWork(pool: SlicePool, live: Int, lanes: Int, total: Long): Chun
  */
 internal fun sliceTarget(lanes: Int, total: Long, remaining: Long): Int {
     val share = (remaining / (lanes.toLong() * 4L)).coerceAtLeast(0L) * 2L
-    return share.coerceIn(MIN_SLICE_TARGET.toLong(), MAX_SLICE_TARGET.toLong()).toInt()
+    return share.coerceIn(MIN_SLICE_TARGET.toLong(), maxSliceFor(total).toLong()).toInt()
 }
 
 /**
@@ -955,9 +1018,9 @@ internal fun isTailRemaining(remaining: Long, lanes: Int): Boolean =
  */
 internal const val TAIL_BDP_SECONDS = 0.25
 
-internal fun bdpFloorBytes(measuredSpeed: Double): Int =
+internal fun bdpFloorBytes(measuredSpeed: Double, maxSlice: Int = MAX_SLICE_TARGET): Int =
     (measuredSpeed * TAIL_BDP_SECONDS).toLong()
-        .coerceIn(0L, MAX_SLICE_TARGET.toLong()).toInt()
+        .coerceIn(0L, maxSlice.toLong()).toInt()
 
 /** 结合剩余量与通道速度算出本片要多少字节（纯函数，便于单测）。 */
 internal fun sliceWant(
@@ -968,7 +1031,7 @@ internal fun sliceWant(
     measuredSpeed: Double,
 ): Int {
     val base = sliceTarget(lanes, total, remaining)
-    val want = maxOf(base, minOf(bdpFloorBytes(measuredSpeed), currentLen))
+    val want = maxOf(base, minOf(bdpFloorBytes(measuredSpeed, maxSliceFor(total)), currentLen))
     return want.coerceIn(1, currentLen)
 }
 
@@ -1028,6 +1091,7 @@ private suspend fun runSlice(
     accumulator: ProgressAccumulator,
     inflight: CallRegistry,
     board: LaneBoard,
+    tracker: ResumeTracker,
 ) {
     var current = initial
 
@@ -1079,6 +1143,7 @@ private suspend fun runSlice(
         try {
             val result = fetchSlice(
                 chunk = Chunk(0, from, to),
+                output = output,
                 pool = pool,
                 inflight = inflight,
                 board = board,
@@ -1122,13 +1187,16 @@ private suspend fun runSlice(
         }
 
         if (outcome.received > 0) {
-            writeAt(output, from, outcome.data, outcome.received)
+            // 流式落盘已在 fetchSlice 内写完，这里只记账
             written.addAndGet(outcome.received.toLong())
             pool.recordDone(outcome.received.toLong())
             accumulator.advance(outcome.received.toLong())
             winner.observe(outcome.elapsedNanos, outcome.received.toLong())
             board.doneSlices.incrementAndGet()
             board.reward(winner.name)
+            // 断点续传记账：落盘节流，避免每片都写文件
+            tracker.markDone(from, from + outcome.received - 1)
+            tracker.maybeCheckpoint()
 
             val seconds = maxOf(outcome.elapsedNanos / 1_000_000_000.0, 0.001)
             board.update(
@@ -1163,13 +1231,12 @@ private suspend fun runSlice(
 }
 
 private data class SliceOutcome(
-    val data: ByteArray,
     val received: Int,
     val elapsedNanos: Long,
 )
 
 /**
- * 真正发起 Range 请求，把这一小片读进内存（不落临时文件）。
+ * 真正发起 Range 请求，把这一小片**边读边写盘**（流式落盘，不驻留内存）。
  *
  * 失败时按指数退避重试；命中 429/503 时读 `Retry-After` 退避 ——
  * Azure 单 Blob 有「约 60 MiB/s 或 500 请求/秒」的目标，超了就是 503 ServerBusy，
@@ -1188,6 +1255,7 @@ private data class SliceOutcome(
  */
 private suspend fun fetchSlice(
     chunk: Chunk,
+    output: RandomAccessFile,
     pool: SlicePool,
     inflight: CallRegistry,
     board: LaneBoard,
@@ -1271,28 +1339,35 @@ private suspend fun fetchSlice(
                     // 兜底（直连）成功不代表镜像恢复，不清除镜像限流标记
                     if (!isFallbackUrl) active.throttled = false
                     val body = response.body ?: throw DownloadException.BadResponse
-                    val buffer = ByteArray(chunk.length.toInt())
+                    // 流式落盘：读 64KB 写 64KB，整片不再驻留内存。
+                    // 大文件 × 高并发下峰值内存从 lanes×slice（可达数百 MB）
+                    // 降到 lanes×64KB，否则 128 并发必 OOM。
+                    // 附带修好 200 全量回退：以前整包进内存（GB 级直接爆），
+                    // 现在只取前 wantLen 字节就停，剩余直接关连接丢弃。
+                    val wantLen = chunk.length.toInt()
                     var received = 0
                     // 慢片超时：单片总耗时封顶，超时即放弃本片走换线重试，
                     // 把区间让给快通道 —— 尾段不再被一条卡住的连接 gate 住。
                     val sliceDeadlineNanos = startedAt + sliceTimeoutMs(chunk.length) * 1_000_000L
+                    val ioBuf = ByteArray(DownloadEngine.BUFFER_SIZE)
                     body.byteStream().use { input ->
-                        while (received < buffer.size) {
+                        while (received < wantLen) {
                             if (System.nanoTime() > sliceDeadlineNanos) {
                                 throw DownloadException.Incomplete
                             }
-                            val read = input.read(buffer, received, buffer.size - received)
+                            val read = input.read(ioBuf, 0, minOf(ioBuf.size, wantLen - received))
                             if (read <= 0) break
+                            writeAt(output, chunk.start + received, ioBuf, read)
                             received += read
                         }
                     }
                     if (received <= 0) throw DownloadException.Incomplete
-                    buffer to received
+                    received
                 }
             } finally {
                 inflight.release(call)
             }
-            return Triple(SliceOutcome(data.first, data.second, System.nanoTime() - startedAt), active, url)
+            return Triple(SliceOutcome(received, System.nanoTime() - startedAt), active, url)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -1445,6 +1520,169 @@ internal object DownloadEngineFlag {
     @Volatile var cancelled = false
 }
 
+/** 已完成区间归一化：裁剪到 [0, total)，丢弃非法，合并重叠/相邻（纯函数，便于单测）。 */
+internal fun normalizeRanges(ranges: List<Chunk>, total: Long): List<Chunk> {
+    if (total <= 0) return emptyList()
+    val clipped = ranges.mapNotNull {
+        val s = it.start.coerceIn(0, total - 1)
+        val e = it.end.coerceIn(0, total - 1)
+        if (s <= e) Chunk(0, s, e) else null
+    }.sortedBy { it.start }
+    if (clipped.isEmpty()) return emptyList()
+    val out = mutableListOf<Chunk>()
+    var cs = clipped[0].start
+    var ce = clipped[0].end
+    for (i in 1 until clipped.size) {
+        val c = clipped[i]
+        if (c.start <= ce + 1) {
+            ce = maxOf(ce, c.end)
+        } else {
+            out.add(Chunk(0, cs, ce))
+            cs = c.start
+            ce = c.end
+        }
+    }
+    out.add(Chunk(0, cs, ce))
+    return out
+}
+
+/** 差集：从 chunk 里挖掉 drops，返回剩余片段（保持顺序，drops 需有序；纯函数，便于单测）。 */
+internal fun subtractRanges(chunk: Chunk, drops: List<Chunk>): List<Chunk> {
+    val out = mutableListOf<Chunk>()
+    var cur = chunk.start
+    for (d in drops) {
+        if (d.end < cur || d.start > chunk.end) continue
+        if (d.start > cur) out.add(Chunk(0, cur, minOf(d.start - 1, chunk.end)))
+        cur = maxOf(cur, d.end + 1)
+        if (cur > chunk.end) break
+    }
+    if (cur <= chunk.end) out.add(Chunk(0, cur, chunk.end))
+    return out
+}
+
+/**
+ * 断点续传的账本：已完成区间（内存合并）+ sidecar 落盘（节流）。
+ *
+ * 格式自定纯文本（`total=123\\nranges=0-99,200-299`），不依赖 org.json
+ * （android.jar 的 Stub 在 JVM 单测下会炸），编解码纯 Kotlin，随处可测。
+ * 落盘走 tmp+rename，保证杀进程时 sidecar 要么完整要么缺失，绝不半截：
+ * 解析失败即视为无续传，从头下。
+ */
+internal class ResumeTracker(
+    private val sidecar: File,
+    val total: Long,
+    private val checkpointIntervalMs: Long = 2000L,
+) {
+    private val lock = Any()
+    private val done = mutableListOf<Chunk>()
+    private var lastCheckpoint = 0L
+
+    fun seed(ranges: List<Chunk>) {
+        synchronized(lock) {
+            done.clear()
+            done.addAll(normalizeRanges(ranges, total))
+        }
+    }
+
+    /** 插入单区间并与邻居合并；done 恒有序不重叠，单次 O(n)，n 通常只有前沿宽度 */
+    fun markDone(start: Long, end: Long) {
+        if (end < start) return
+        synchronized(lock) {
+            var s = start.coerceIn(0, total - 1)
+            var e = end.coerceIn(0, total - 1)
+            if (e < s) return
+            var i = 0
+            while (i < done.size && done[i].end < s - 1) i++
+            var j = i
+            while (j < done.size && done[j].start <= e + 1) {
+                s = minOf(s, done[j].start)
+                e = maxOf(e, done[j].end)
+                j++
+            }
+            repeat(j - i) { done.removeAt(i) }
+            done.add(i, Chunk(0, s, e))
+        }
+    }
+
+    fun snapshot(): List<Chunk> = synchronized(lock) { done.toList() }
+
+    fun bytesDone(): Long = synchronized(lock) { done.sumOf { it.length } }
+
+    fun encode(): String = synchronized(lock) {
+        "total=$total\nranges=" + done.joinToString(",") { "${it.start}-${it.end}" }
+    }
+
+    fun maybeCheckpoint(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        synchronized(lock) {
+            if (!force && now - lastCheckpoint < checkpointIntervalMs) return
+        }
+        // 先写 tmp 再 rename：杀进程只会留下完整版或什么都没有
+        runCatching {
+            val payload = encode()
+            val tmp = File(sidecar.absolutePath + ".tmp")
+            tmp.writeText(payload)
+            if (!tmp.renameTo(sidecar)) sidecar.writeText(payload)
+        }
+        synchronized(lock) { lastCheckpoint = System.currentTimeMillis() }
+    }
+
+    fun delete() {
+        sidecar.delete()
+    }
+
+    companion object {
+        /** 严格解析，任何变形都返回 null（调用方视为无续传，从头下）。 */
+        fun parse(raw: String): Pair<Long, List<Chunk>>? {
+            val lines = raw.lines()
+            if (lines.size < 2) return null
+            val head = lines[0]
+            val body = lines[1]
+            if (!head.startsWith("total=") || !body.startsWith("ranges=")) return null
+            val total = head.removePrefix("total=").toLongOrNull() ?: return null
+            if (total <= 0) return null
+            val rangesPart = body.removePrefix("ranges=")
+            val ranges = if (rangesPart.isBlank()) {
+                emptyList()
+            } else {
+                rangesPart.split(",").map { seg ->
+                    val se = seg.split("-")
+                    if (se.size != 2) return null
+                    val s = se[0].toLongOrNull() ?: return null
+                    val e = se[1].toLongOrNull() ?: return null
+                    if (s > e) return null
+                    Chunk(0, s, e)
+                }
+            }
+            return total to normalizeRanges(ranges, total)
+        }
+
+        /**
+         * 续传准入：part 长度必须恰为 total（setLength 保证），账本 total 必须一致，
+         * 任一不满足都删掉重来 —— 宁可重下，不写坏文件。
+         */
+        fun loadResumeRanges(sidecar: File, part: File, total: Long): List<Chunk> {
+            if (!part.exists() || part.length() != total) {
+                part.delete()
+                sidecar.delete()
+                return emptyList()
+            }
+            if (!sidecar.exists()) {
+                // 有数据没账本：不敢信，删掉重下
+                part.delete()
+                return emptyList()
+            }
+            val parsed = runCatching { parse(sidecar.readText()) }.getOrNull()
+            if (parsed == null || parsed.first != total) {
+                part.delete()
+                sidecar.delete()
+                return emptyList()
+            }
+            return parsed.second
+        }
+    }
+}
+
 /**
  * 待下载区间的池子（滑动窗口）。
  *
@@ -1503,6 +1741,26 @@ internal class SlicePool(val total: Long, slices: Int = 1) {
         val chunk = queue.pollFirst()
         checkInvariants()
         return chunk
+    }
+
+    /**
+     * 续传：从队列里挖掉已完成区间，返回已完成字节数。
+     * 调用方据此 seed 进度（written / accumulator / tracker），三者必须一致，
+     * 否则进度条与 pool 脱节、收尾判定会错。
+     */
+    fun excludeDone(done: List<Chunk>): Long {
+        val norm = normalizeRanges(done, total)
+        if (norm.isEmpty()) return 0L
+        val kept = mutableListOf<Chunk>()
+        while (true) {
+            val c = queue.pollFirst() ?: break
+            kept.addAll(subtractRanges(c, norm))
+        }
+        kept.forEach { queue.addLast(it) }
+        checkInvariants()
+        val bytes = norm.sumOf { it.length }
+        completed.addAndGet(bytes)
+        return bytes
     }
 
     /** 把没下完的区间还回队列最前面 */
@@ -1583,13 +1841,15 @@ private val ENABLE_INVARIANTS: Boolean =
 class ProgressAccumulator(
     private val total: Long,
     private val handler: (DownloadProgress) -> Unit,
+    /** 续传起点：已完成字节，进度条从这里起算而不是从 0 */
+    initialBytes: Long = 0,
     /** 快照来源：每拍现取一次车道看板，拿到的就是「此刻」而不是「启动时」的明细 */
     private val diagnostics: (() -> DownloadDiagnostics?)? = null,
 ) {
-    @Volatile private var downloaded = 0L
+    @Volatile private var downloaded = initialBytes
     @Volatile private var lastEmit = 0L
     @Volatile private var lastSampleTime = System.nanoTime()
-    @Volatile private var lastSampleBytes = 0L
+    @Volatile private var lastSampleBytes = initialBytes
     @Volatile private var smoothedSpeed = 0.0
     @Volatile private var zeroStreak = 0
 

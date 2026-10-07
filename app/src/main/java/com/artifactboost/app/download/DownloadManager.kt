@@ -358,6 +358,8 @@ class DownloadManager(
     /** 只有网络类错误才值得重试；权限、产物已删除等错误直接抛出 */
     private fun shouldRetry(error: Throwable): Boolean {
         if (isCancellation(error)) return false
+        // 空间不足重试没有意义，直接失败提示用户清理
+        if (error is DownloadException.NoSpace) return false
         val ghError = error as? GitHubException ?: return true
         return when (ghError) {
             is GitHubException.Http -> ghError.code >= 500 || ghError.code == 429
