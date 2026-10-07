@@ -1312,7 +1312,7 @@ private suspend fun fetchSlice(
             // 注意用 active.client：本轮可能已换线，用初始通道的连接池就串线了。
             val call = active.client.newCall(request)
             inflight.register(call)
-            val data = try {
+            val received = try {
                 call.execute().use { response ->
                     when (response.code) {
                         206 -> Unit
